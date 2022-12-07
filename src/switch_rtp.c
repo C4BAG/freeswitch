@@ -1269,21 +1269,25 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 			cmp = switch_cmp_addr(from_addr, ice->addr);
 
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG4,
-							  "STUN from %s:%d %s\n", host, port, cmp ? "EXPECTED" : "IGNORED");
+										      "STUN from %s:%d %s\n", host, port, cmp ? "EXPECTED" : "IGNORED");
 
 			if (cmp) {
 				ice->last_ok = now;
 				rtp_session->wrong_addrs = 0;
 			} else {
-				if (((rtp_session->dtls && rtp_session->dtls->state != DS_READY) || !ice->ready || !ice->rready) && rtp_session->ice_adj == 0) {
+				if (((rtp_session->dtls && rtp_session->dtls->state != DS_READY) || !ice->ready || !ice->rready) && 
+					rtp_session->wrong_addrs > 2 && rtp_session->ice_adj == 0) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG, "Auto adjust accepted\n");
 					do_adj++;
 					rtp_session->ice_adj = 1;
 					rtp_session->wrong_addrs = 0;
-				} else if (rtp_session->wrong_addrs > 10 || elapsed >= 10000) {
+
+				} else if (rtp_session->wrong_addrs > 3 || elapsed >= 3000) { // orig (rtp_session->wrong_addrs > 10 || elapsed >= 10000)
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+							  "enable do_adj at rtp_session->wrong_addrs = %d; elapsed = %d\n", rtp_session->wrong_addrs, elapsed);
 					do_adj++;
 				}
-
+				
 				if (!do_adj) {
 					rtp_session->wrong_addrs++;
 				}
