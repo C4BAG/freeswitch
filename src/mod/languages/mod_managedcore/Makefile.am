@@ -40,7 +40,7 @@ install-data-local: $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll
 	$(INSTALL) $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.deps.json $(DESTDIR)$(modulesdir)
 
 uninstall:
-    rm -fr $(DESTDIR)$(libdir)/$(COREHOST_LIB)
+	rm -fr $(DESTDIR)$(libdir)/$(COREHOST_LIB)
 	rm -fr $(DESTDIR)$(modulesdir)/mod_managedcore.so
 	rm -fr $(DESTDIR)$(modulesdir)/FreeSWITCH.ManagedCore.dll
 	rm -fr $(DESTDIR)$(modulesdir)/FreeSWITCH.ManagedCore.runtimeconfig.json
