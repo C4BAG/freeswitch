@@ -28,6 +28,7 @@ reswig: swigclean freeswitch_wrap.cxx
 
 export DOTNET_CLI_HOME=/tmp/dotnet
 $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll: $(CS_SRC)
+	which dotnet > /tmp/dotnet/which.log
 	dotnet --help > /tmp/dotnet/test.log
 	dotnet build -c Release $(CS_PROJ)
 
