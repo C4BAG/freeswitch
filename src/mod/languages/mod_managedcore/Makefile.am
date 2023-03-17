@@ -3,8 +3,8 @@ MODNAME=mod_managedcore
 MANAGED_DIR=$(switch_srcdir)/src/mod/languages/mod_managedcore/managed
 
 # Make these come from pkg-config or autoconf dependancy detection later
-COREHOST_CFLAGS = -I/usr/share/dotnet/packs/Microsoft.NETCore.App.Host.linux-x64/6.0.14/runtimes/linux-x64/native
-COREHOST_LDFLAGS = /usr/share/dotnet/packs/Microsoft.NETCore.App.Host.linux-x64/6.0.14/runtimes/linux-x64/native/libnethost.a
+COREHOST_CFLAGS = -I/usr/share/dotnet/packs/Microsoft.NETCore.App.Host.linux-x64/6.0.15/runtimes/linux-x64/native
+COREHOST_LDFLAGS = /usr/share/dotnet/packs/Microsoft.NETCore.App.Host.linux-x64/6.0.15/runtimes/linux-x64/native/libnethost.a
 
 mod_LTLIBRARIES = mod_managedcore.la
 mod_managedcore_la_SOURCES  = mod_managedcore.cpp freeswitch_managedcore.cpp freeswitch_wrap.cxx
