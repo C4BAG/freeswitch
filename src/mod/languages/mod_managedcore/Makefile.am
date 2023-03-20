@@ -3,8 +3,10 @@ MODNAME=mod_managedcore
 MANAGED_DIR=$(switch_srcdir)/src/mod/languages/mod_managedcore/managed
 
 # Make these come from pkg-config or autoconf dependancy detection later
-COREHOST_CFLAGS = -I/usr/share/dotnet/packs/Microsoft.NETCore.App.Host.linux-x64/6.0.15/runtimes/linux-x64/native
-COREHOST_LDFLAGS = /usr/share/dotnet/packs/Microsoft.NETCore.App.Host.linux-x64/6.0.15/runtimes/linux-x64/native/libnethost.a
+COREHOST_LIB = libnethost.so
+COREHOST_PATH = /usr/share/dotnet/packs/Microsoft.NETCore.App.Host.linux-x64/6.0.15/runtimes/linux-x64/native
+COREHOST_CFLAGS = -I$(COREHOST_PATH) -L$(COREHOST_PATH)
+COREHOST_LDFLAGS = -lnethost
 
 mod_LTLIBRARIES = mod_managedcore.la
 mod_managedcore_la_SOURCES  = mod_managedcore.cpp freeswitch_managedcore.cpp freeswitch_wrap.cxx
@@ -29,21 +31,17 @@ reswig: swigclean freeswitch_wrap.cxx
 export DOTNET_CLI_HOME=/tmp/dotnet
 export HOME=/tmp/dotnet
 $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll: $(CS_SRC)
-	which dotnet > /tmp/dotnet/which.log
-	ls /usr/bin > /tmp/dotnet/ls.log
-	printenv > /tmp/dotnet/env.log
-	dotnet --list-sdks > /tmp/dotnet/sdks.log
-	dotnet --info > /tmp/dotnet/info.log
-	dotnet --help > /tmp/dotnet/help.log
-	dotnet build -v diag -c Release $(CS_PROJ)
+	dotnet build -c Release $(CS_PROJ)
 
 install-data-local: $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll
 	mkdir -p $(DESTDIR)$(modulesdir)/managedcore
+	$(INSTALL) $(COREHOST_PATH)/$(COREHOST_LIB) $(DESTDIR)$(libdir)
 	$(INSTALL) $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll $(DESTDIR)$(modulesdir)
 	$(INSTALL) $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.runtimeconfig.json $(DESTDIR)$(modulesdir)
 	$(INSTALL) $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.deps.json $(DESTDIR)$(modulesdir)
 
 uninstall:
+	rm -fr $(DESTDIR)$(libdir)/$(COREHOST_LIB)
 	rm -fr $(DESTDIR)$(modulesdir)/mod_managedcore.so
 	rm -fr $(DESTDIR)$(modulesdir)/FreeSWITCH.ManagedCore.dll
 	rm -fr $(DESTDIR)$(modulesdir)/FreeSWITCH.ManagedCore.runtimeconfig.json
