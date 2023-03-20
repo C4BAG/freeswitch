@@ -29,10 +29,12 @@ reswig: swigclean freeswitch_wrap.cxx
 export DOTNET_CLI_HOME=/tmp/dotnet
 $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll: $(CS_SRC)
 	which dotnet > /tmp/dotnet/which.log
-	ls /usr/bin > /tmp/ls.log
-	printenv > /tmp/env.log
-	dotnet --list-sdks > /tmp/dotnet/test.log
-	dotnet build -c Release $(CS_PROJ)
+	ls /usr/bin > /tmp/dotnet/ls.log
+	printenv > /tmp/dotnet/env.log
+	dotnet --list-sdks > /tmp/dotnet/sdks.log
+	dotnet --info > /tmp/dotnet/info.log
+	dotnet --help > /tmp/dotnet/help.log
+	dotnet build -v diag -c Release $(CS_PROJ)
 
 install-data-local: $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll
 	mkdir -p $(DESTDIR)$(modulesdir)/managedcore
