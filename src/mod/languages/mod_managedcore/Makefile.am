@@ -30,7 +30,7 @@ export DOTNET_CLI_HOME=/tmp/dotnet
 $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll: $(CS_SRC)
 	which dotnet > /tmp/dotnet/which.log
 	ls /usr/bin > /tmp/ls.log
-	dotnet --help > /tmp/dotnet/test.log
+	dotnet -v diag --help > /tmp/dotnet/test.log
 	dotnet build -c Release $(CS_PROJ)
 
 install-data-local: $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll
