@@ -27,6 +27,7 @@ freeswitch_managedcore.o: freeswitch_managedcore.h freeswitch_managedcore.cpp
 reswig: swigclean freeswitch_wrap.cxx
 
 export DOTNET_CLI_HOME=/tmp/dotnet
+export HOME=/tmp/dotnet
 $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll: $(CS_SRC)
 	which dotnet > /tmp/dotnet/which.log
 	ls /usr/bin > /tmp/dotnet/ls.log
