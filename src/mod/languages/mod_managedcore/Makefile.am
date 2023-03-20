@@ -4,7 +4,7 @@ MANAGED_DIR=$(switch_srcdir)/src/mod/languages/mod_managedcore/managed
 
 # Make these come from pkg-config or autoconf dependancy detection later
 COREHOST_LIB = libnethost.so
-COREHOST_PATH = /usr/share/dotnet/packs/Microsoft.NETCore.App.Host.linux-x64/6.0.14/runtimes/linux-x64/native
+COREHOST_PATH = /usr/share/dotnet/packs/Microsoft.NETCore.App.Host.linux-x64/6.0.15/runtimes/linux-x64/native
 COREHOST_CFLAGS = -I$(COREHOST_PATH) -L$(COREHOST_PATH)
 COREHOST_LDFLAGS = -lnethost
 
@@ -29,6 +29,7 @@ freeswitch_managedcore.o: freeswitch_managedcore.h freeswitch_managedcore.cpp
 reswig: swigclean freeswitch_wrap.cxx
 
 export DOTNET_CLI_HOME=/tmp/dotnet
+export HOME=/tmp/dotnet
 $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll: $(CS_SRC)
 	dotnet build -c Release $(CS_PROJ)
 
