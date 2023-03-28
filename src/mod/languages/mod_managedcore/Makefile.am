@@ -30,8 +30,11 @@ reswig: swigclean freeswitch_wrap.cxx
 
 export DOTNET_CLI_HOME=/tmp/dotnet
 export HOME=/tmp/dotnet
-$(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll: $(CS_SRC)
+$(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll: $(CS_SRC) $(top_srcdir)/x64/Release/mod/libnethost.so
 	dotnet build -c Release $(CS_PROJ)
+
+$(top_srcdir)/x64/Release/mod/libnethost.so: $(COREHOST_PATH)/$(COREHOST_LIB)
+	cp $(COREHOST_PATH)/$(COREHOST_LIB) $(top_srcdir)/x64/Release/mod/libnethost.so
 
 install-data-local: $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll
 	mkdir -p $(DESTDIR)$(modulesdir)/managedcore
