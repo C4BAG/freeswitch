@@ -34,6 +34,7 @@ $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll: $(CS_SRC) $(top_srcdir
 	dotnet build -c Release $(CS_PROJ)
 
 $(top_srcdir)/x64/Release/mod/libnethost.so: $(COREHOST_PATH)/$(COREHOST_LIB)
+	mkdir -p $(top_srcdir)/x64/Release/mod
 	cp $(COREHOST_PATH)/$(COREHOST_LIB) $(top_srcdir)/x64/Release/mod/libnethost.so
 
 install-data-local: $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll
