@@ -2,7 +2,7 @@ include $(top_srcdir)/build/modmake.rulesam
 MODNAME=mod_managedcore
 MANAGED_DIR=$(switch_srcdir)/src/mod/languages/mod_managedcore/managed
 
-# Make these come from pkg-config or autoconf dependancy detection later
+# Make these come from pkg-config or autoconf dependency detection later
 COREHOST_LIB = libnethost.so
 COREHOST_PATH = /usr/share/dotnet/packs/Microsoft.NETCore.App.Host.linux-x64/6.0.15/runtimes/linux-x64/native
 COREHOST_CFLAGS = -I$(COREHOST_PATH) -L$(COREHOST_PATH)
@@ -30,8 +30,12 @@ reswig: swigclean freeswitch_wrap.cxx
 
 export DOTNET_CLI_HOME=/tmp/dotnet
 export HOME=/tmp/dotnet
-$(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll: $(CS_SRC)
+$(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll: $(CS_SRC) $(top_srcdir)/x64/Release/mod/libnethost.so
 	dotnet build -c Release $(CS_PROJ)
+
+$(top_srcdir)/x64/Release/mod/libnethost.so: $(COREHOST_PATH)/$(COREHOST_LIB)
+	mkdir -p $(top_srcdir)/x64/Release/mod
+	cp $(COREHOST_PATH)/$(COREHOST_LIB) $(top_srcdir)/x64/Release/mod/libnethost.so
 
 install-data-local: $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll
 	mkdir -p $(DESTDIR)$(modulesdir)/managedcore
