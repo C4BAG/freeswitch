@@ -2,7 +2,7 @@ include $(top_srcdir)/build/modmake.rulesam
 MODNAME=mod_managedcore
 MANAGED_DIR=$(switch_srcdir)/src/mod/languages/mod_managedcore/managed
 
-# Make these come from pkg-config or autoconf dependancy detection later
+# Make these come from pkg-config or autoconf dependency detection later
 COREHOST_LIB = libnethost.so
 COREHOST_PATH = /usr/share/dotnet/packs/Microsoft.NETCore.App.Host.linux-x64/6.0.15/runtimes/linux-x64/native
 COREHOST_CFLAGS = -I$(COREHOST_PATH) -L$(COREHOST_PATH)
