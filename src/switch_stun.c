@@ -702,8 +702,17 @@ SWITCH_DECLARE(char *) switch_stun_host_lookup(const char *host, switch_memory_p
 
 }
 
-SWITCH_DECLARE(switch_status_t) switch_stun_lookup(char **ip,
-												   switch_port_t *port, char *stunip, switch_port_t stunport, char **err, switch_memory_pool_t *pool)
+SWITCH_DECLARE(switch_status_t) switch_stun_lookup(char **ip, switch_port_t *port, char *stunip, switch_port_t stunport, char **err, switch_memory_pool_t *pool)
+{
+	return switch_stun_lookup_ipv4v6(SWITCH_INET, ip, port, stunip, stunport, err, pool);
+}
+
+SWITCH_DECLARE(switch_status_t) switch_stun_lookup_ipv6(char **ip, switch_port_t *port, char *stunip, switch_port_t stunport, char **err, switch_memory_pool_t *pool)
+{
+	return switch_stun_lookup_ipv4v6(SWITCH_INET6, ip, port, stunip, stunport, err, pool);
+}
+
+SWITCH_DECLARE(switch_status_t) switch_stun_lookup_ipv4v6(int32_t family, char **ip, switch_port_t *port, char *stunip, switch_port_t stunport, char **err, switch_memory_pool_t *pool)
 {
 	switch_sockaddr_t *local_addr = NULL, *remote_addr = NULL, *from_addr = NULL;
 	switch_socket_t *sock = NULL;
@@ -717,7 +726,6 @@ SWITCH_DECLARE(switch_status_t) switch_stun_lookup(char **ip,
 	char rip[50] = { 0 };
 	uint16_t rport = 0;
 	switch_time_t started = 0;
-	unsigned int elapsed = 0;
 	int funny = 0;
 	int size = sizeof(buf);
 	int xlen = sizeof(switch_stun_packet_header_t);
@@ -730,19 +738,19 @@ SWITCH_DECLARE(switch_status_t) switch_stun_lookup(char **ip,
 
 	*err = "Success";
 
-	switch_sockaddr_info_get(&from_addr, NULL, SWITCH_UNSPEC, 0, 0, pool);
+	switch_sockaddr_info_get(&from_addr, NULL, family, 0, 0, pool);
 
-	if (switch_sockaddr_info_get(&local_addr, *ip, SWITCH_UNSPEC, *port, 0, pool) != SWITCH_STATUS_SUCCESS) {
+	if (switch_sockaddr_info_get(&local_addr, *ip, family, *port, 0, pool) != SWITCH_STATUS_SUCCESS) {
 		*err = "Local Address Error!";
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (switch_sockaddr_info_get(&remote_addr, stunip, SWITCH_UNSPEC, stunport, 0, pool) != SWITCH_STATUS_SUCCESS) {
+	if (switch_sockaddr_info_get(&remote_addr, stunip, family, stunport, 0, pool) != SWITCH_STATUS_SUCCESS) {
 		*err = "Remote Address Error!";
 		return SWITCH_STATUS_FALSE;
 	}
 
-	if (switch_socket_create(&sock, AF_INET, SOCK_DGRAM, 0, pool) != SWITCH_STATUS_SUCCESS) {
+	if (switch_socket_create(&sock, family, SOCK_DGRAM, 0, pool) != SWITCH_STATUS_SUCCESS) {
 		*err = "Socket Error!";
 		return SWITCH_STATUS_FALSE;
 	}
@@ -787,7 +795,7 @@ SWITCH_DECLARE(switch_status_t) switch_stun_lookup(char **ip,
 			break;
 		}
 
-		if ((elapsed = (unsigned int) ((switch_micro_time_now() - started) / 1000)) > 5000) {
+		if (((unsigned int)((switch_micro_time_now() - started) / 1000)) > 5000) {
 			*err = "Timeout";
 			switch_socket_shutdown(sock, SWITCH_SHUTDOWN_READWRITE);
 			switch_socket_close(sock);
