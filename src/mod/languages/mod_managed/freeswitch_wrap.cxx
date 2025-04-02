@@ -45303,7 +45303,7 @@ SWIGEXPORT void SWIGSTDCALL CSharp_FreeSWITCHfNative_icand_t_responsive_set___(v
   
   arg1 = (icand_s *)jarg1; 
   arg2 = (uint8_t)jarg2; 
-  if (arg1) (arg1)->responsive = arg2;
+  //if (arg1) (arg1)->responsive = arg2;
 }
 
 
@@ -45313,7 +45313,7 @@ SWIGEXPORT unsigned char SWIGSTDCALL CSharp_FreeSWITCHfNative_icand_t_responsive
   uint8_t result;
   
   arg1 = (icand_s *)jarg1; 
-  result = (uint8_t) ((arg1)->responsive);
+  result = 0; //(uint8_t) ((arg1)->responsive);
   jresult = result; 
   return jresult;
 }
@@ -45325,7 +45325,7 @@ SWIGEXPORT void SWIGSTDCALL CSharp_FreeSWITCHfNative_icand_t_use_candidate_set__
   
   arg1 = (icand_s *)jarg1; 
   arg2 = (uint8_t)jarg2; 
-  if (arg1) (arg1)->use_candidate = arg2;
+  //if (arg1) (arg1)->use_candidate = arg2;
 }
 
 
@@ -45335,7 +45335,7 @@ SWIGEXPORT unsigned char SWIGSTDCALL CSharp_FreeSWITCHfNative_icand_t_use_candid
   uint8_t result;
   
   arg1 = (icand_s *)jarg1; 
-  result = (uint8_t) ((arg1)->use_candidate);
+  result = 0; //(uint8_t) ((arg1)->use_candidate);
   jresult = result; 
   return jresult;
 }
