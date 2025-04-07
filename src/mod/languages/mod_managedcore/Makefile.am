@@ -31,7 +31,7 @@ reswig: swigclean freeswitch_wrap.cxx
 export DOTNET_CLI_HOME=/tmp/dotnet
 export HOME=/tmp/dotnet
 $(top_srcdir)/x64/Release/mod/FreeSWITCH.ManagedCore.dll: $(CS_SRC) $(top_srcdir)/x64/Release/mod/libnethost.so
-	dotnet build -c Release $(CS_PROJ)
+	dotnet build -c Release -p:Platform=x64 $(CS_PROJ)
 
 $(top_srcdir)/x64/Release/mod/libnethost.so: $(COREHOST_PATH)/$(COREHOST_LIB)
 	mkdir -p $(top_srcdir)/x64/Release/mod
