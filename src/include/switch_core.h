@@ -41,6 +41,8 @@
 #ifndef SWITCH_CORE_H
 #define SWITCH_CORE_H
 
+#define SWITCH_DEBUG_RWLOCKS
+
 #include <switch.h>
 
 SWITCH_BEGIN_EXTERN_C
