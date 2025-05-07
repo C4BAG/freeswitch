@@ -105,6 +105,7 @@ typedef struct icand_s {
 	uint8_t ready;
 	//uint8_t responsive;
 	//uint8_t use_candidate;
+	char acl_passed;
 } icand_t;
 
 #define MAX_CAND 50

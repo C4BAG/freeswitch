@@ -544,6 +544,7 @@ static void do_2833(switch_rtp_t *rtp_session);
 
 
 #define rtp_type(rtp_session) rtp_session->flags[SWITCH_RTP_FLAG_TEXT] ?  "text" : (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] ? "video" : "audio")
+#define rtp_media_type(rtp_session) rtp_session->flags[SWITCH_RTP_FLAG_TEXT] ?  SWITCH_MEDIA_TYPE_TEXT : (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] ? SWITCH_MEDIA_TYPE_VIDEO : SWITCH_MEDIA_TYPE_AUDIO)
 
 
 static void switch_rtp_change_ice_dest(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, const char *host, switch_port_t port)
@@ -583,7 +584,42 @@ static void switch_rtp_change_ice_dest(switch_rtp_t *rtp_session, switch_rtp_ice
 
 }
 
+#define ACL_PASSED_TRUE 2
+#define ACL_PASSED_FALSE 1
+#define ACL_PASSED_TO_BOOL(char_acl_passed) ((char_acl_passed) > 0 ? (char_acl_passed) - 1 : 0)
+#define ACL_PASSED_TO_BOOL_STR(char_acl_passed) (ACL_PASSED_TO_BOOL((char_acl_passed))? "true" : "false")
 
+static int switch_rtp_ice_acl_check(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, const char *host, switch_port_t port)
+{
+	if (strlen(host) == 0) 
+		return -1;
+
+	int is_rtcp = ice == &rtp_session->rtcp_ice;
+	int i;
+	for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
+		if (!strcmp(host, ice->ice_params->cands[i][ice->proto].con_addr) && port == ice->ice_params->cands[i][ice->proto].con_port) {
+			if (ice->ice_params->cands[i][ice->proto].acl_passed) {
+				if (ice->ice_params->cands[i][ice->proto].acl_passed == ACL_PASSED_FALSE) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "ICE candidate [%s:%d] %s acl_passed: false\n", host, port, is_rtcp? "rtcp" : "rtp");
+				}
+				return ACL_PASSED_TO_BOOL(ice->ice_params->cands[i][ice->proto].acl_passed);
+			}
+			break;
+		}
+	}
+
+	switch_status_t st = switch_core_media_check_ice_acl(rtp_session->session, rtp_media_type(rtp_session), host);
+	char acl_passed = ACL_PASSED_TRUE;
+
+	if (st != SWITCH_STATUS_SUCCESS) {
+		acl_passed = ACL_PASSED_FALSE;
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "ICE candidate [%s:%d] %s acl_passed: false, check_ice_acl: %d\n", host, port, is_rtcp ? "rtcp" : "rtp", st);
+	}
+
+	if (i < ice->ice_params->cand_idx[ice->proto]) 
+		ice->ice_params->cands[i][ice->proto].acl_passed = acl_passed;
+	return ACL_PASSED_TO_BOOL(acl_passed);
+}
 
 static handle_rfc2833_result_t handle_rfc2833(switch_rtp_t *rtp_session, switch_size_t bytes, int *do_cng)
 {
@@ -981,6 +1017,19 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 	int is_rtcp = ice == &rtp_session->rtcp_ice;
 	uint32_t elapsed;
 	switch_time_t ref_point;
+
+	switch_sockaddr_t *from_addr = rtp_session->from_addr;
+	const char *from_host = NULL;
+	switch_port_t from_port = 0;
+	char faddr_buf[80] = "";
+
+	if (is_rtcp) { 
+		from_addr = rtp_session->rtcp_from_addr; 
+	}
+
+	from_host = switch_get_addr(faddr_buf, sizeof(faddr_buf), from_addr);
+	from_port = switch_sockaddr_get_port(from_addr);
+
 	/*switch_channel_t *channel;
 	int i;
 	switch_sockaddr_t *from_addr = rtp_session->from_addr;
@@ -1126,6 +1175,12 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 
 		xlen += 4 + switch_stun_attribute_padded_length(attr);
 	} while (xlen <= packet->header.length);
+
+	if (1 != switch_rtp_ice_acl_check(rtp_session, ice, from_host, from_port)) { 
+		goto end; // ToDo: Response?: See RFC 8445: If the controlled agent does not accept the request from the
+		          // controlling agent, the controlled agent MUST reject the nomination request
+		          // with an appropriate error code response (e.g., 400)
+	}
 
 	if ((ice->type & ICE_GOOGLE_JINGLE) && ok) {
 		ok = !strcmp(ice->user_ice, username);

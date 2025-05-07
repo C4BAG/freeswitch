@@ -3874,6 +3874,36 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_add_ice_acl(switch_core_sessio
 	return SWITCH_STATUS_FALSE;
 }
 
+SWITCH_DECLARE(switch_status_t) switch_core_media_check_ice_acl(switch_core_session_t *session, switch_media_type_t type, const char *addr)
+{
+	switch_media_handle_t *smh;
+	switch_rtp_engine_t *engine;
+
+	switch_assert(session);
+
+	if (strlen(addr) == 0) { 
+		return SWITCH_STATUS_MEMERR; 
+	}
+
+	if (!(smh = session->media_handle)) { 
+		return SWITCH_STATUS_GENERR; 
+	}
+
+	if (!(engine = &smh->engines[type])) { 
+		return SWITCH_STATUS_GENERR; 
+	}
+
+	for (int ai = 0; ai < engine->cand_acl_count; ai++) {
+		if (switch_check_network_list_ip(addr, engine->cand_acl[ai])) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG6, "Candidate %s (%s) passed user acl \"%s\" (%d of %d)\n", addr, switch_media_type2str(type), engine->cand_acl[ai], ai, engine->cand_acl_count);
+			return SWITCH_STATUS_SUCCESS;
+		}
+	}
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG6, "Candidate %s (%s) denied by user acl\n", addr, switch_media_type2str(type));
+	return SWITCH_STATUS_FALSE;
+}
+
 //?
 SWITCH_DECLARE(void) switch_core_media_check_video_codecs(switch_core_session_t *session)
 {
