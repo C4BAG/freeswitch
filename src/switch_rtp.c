@@ -1153,9 +1153,11 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 				}
 			}
 
-			if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+			// This line sends PLI/FIR requests to senders which in turn produce keyframes.
+			// We dont want this to happen every time we send a stun response. Philipp: Convince me otherwise :)
+			/*if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
 				switch_core_session_video_reinit(rtp_session->session);
-			}
+			}*/
 		}
 
 		if (!ok && ice == &rtp_session->ice && rtp_session->rtcp_ice.ice_params && pri &&
