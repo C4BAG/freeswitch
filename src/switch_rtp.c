@@ -591,11 +591,16 @@ static void switch_rtp_change_ice_dest(switch_rtp_t *rtp_session, switch_rtp_ice
 
 static int switch_rtp_ice_acl_check(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, const char *host, switch_port_t port)
 {
+	int is_rtcp; 
+	int i;
+	switch_status_t st;
+	char acl_passed;
+
 	if (strlen(host) == 0) 
 		return -1;
 
-	int is_rtcp = ice == &rtp_session->rtcp_ice;
-	int i;
+	is_rtcp = ice == &rtp_session->rtcp_ice;
+
 	for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
 		if (!strcmp(host, ice->ice_params->cands[i][ice->proto].con_addr) && port == ice->ice_params->cands[i][ice->proto].con_port) {
 			if (ice->ice_params->cands[i][ice->proto].acl_passed) {
@@ -608,8 +613,8 @@ static int switch_rtp_ice_acl_check(switch_rtp_t *rtp_session, switch_rtp_ice_t 
 		}
 	}
 
-	switch_status_t st = switch_core_media_check_ice_acl(rtp_session->session, rtp_media_type(rtp_session), host);
-	char acl_passed = ACL_PASSED_TRUE;
+	st = switch_core_media_check_ice_acl(rtp_session->session, rtp_media_type(rtp_session), host);
+	acl_passed = ACL_PASSED_TRUE;
 
 	if (st != SWITCH_STATUS_SUCCESS) {
 		acl_passed = ACL_PASSED_FALSE;
