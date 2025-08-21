@@ -481,7 +481,7 @@ struct cc_queue {
 	switch_xml_config_item_t config[CC_QUEUE_CONFIGITEM_COUNT];
 	switch_xml_config_string_options_t config_str_pool;
 
-	switch_bool_t fast_callcenter;
+	switch_bool_t c4b_fast_callcenter;
 
 };
 typedef struct cc_queue cc_queue_t;
@@ -585,7 +585,7 @@ cc_queue_t *queue_set_config(cc_queue_t *queue)
 
 	SWITCH_CONFIG_SET_ITEM(queue->config[i++], "skip-agents-with-external-calls", SWITCH_CONFIG_BOOL, 0, &queue->skip_agents_with_external_calls, SWITCH_TRUE, NULL, NULL, NULL);
 
-	SWITCH_CONFIG_SET_ITEM(queue->config[i++], "fast_callcenter", SWITCH_CONFIG_BOOL, 0, &queue->fast_callcenter, SWITCH_FALSE, NULL, NULL, NULL);
+	SWITCH_CONFIG_SET_ITEM(queue->config[i++], "fast_callcenter", SWITCH_CONFIG_BOOL, 0, &queue->c4b_fast_callcenter, SWITCH_FALSE, NULL, NULL, NULL);
 
 
 	switch_assert(i < CC_QUEUE_CONFIGITEM_COUNT);
@@ -2875,7 +2875,7 @@ void *SWITCH_THREAD_FUNC cc_member_thread_run(switch_thread_t *thread, void *obj
 			/* timeout reached, check if we're originating at this time and give caller a one more chance */
 			if (switch_channel_test_app_flag_key(CC_APP_KEY, member_channel, CC_APP_AGENT_CONNECTING)) {
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(member_session), SWITCH_LOG_DEBUG, "Member %s <%s> in queue '%s' reached max wait time and we're connecting, waiting for agent to be connected...\n", m->member_cid_name, m->member_cid_number, m->queue_name);
-				if (!queue->fast_callcenter) {
+				if (!queue->c4b_fast_callcenter) {
 					// Wait until the agent is connected or timed out
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(member_session), SWITCH_LOG_DEBUG,
 									  "Waiting for agent to connect or timeout...\n");
@@ -4124,7 +4124,7 @@ SWITCH_STANDARD_JSON_API(json_callcenter_config_function)
 			cJSON_AddItemToObject(o, "record_template", cJSON_CreateString(queue->record_template));
 			cJSON_AddItemToObject(o, "skip_agents_with_external_calls", cJSON_CreateString(queue->skip_agents_with_external_calls ? "true" : "false"));
 			cJSON_AddItemToObject(o, "agent_no_answer_status", cJSON_CreateString(queue->agent_no_answer_status));
-			cJSON_AddItemToObject(o, "fast_callcenter", cJSON_CreateString(queue->fast_callcenter ? "true" : "false"));
+			cJSON_AddItemToObject(o, "fast_callcenter", cJSON_CreateString(queue->c4b_fast_callcenter ? "true" : "false"));
 			cJSON_AddItemToArray(reply, o);
 			queue = NULL;
         }
