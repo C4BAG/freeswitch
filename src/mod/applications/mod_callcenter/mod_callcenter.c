@@ -585,7 +585,7 @@ cc_queue_t *queue_set_config(cc_queue_t *queue)
 
 	SWITCH_CONFIG_SET_ITEM(queue->config[i++], "skip-agents-with-external-calls", SWITCH_CONFIG_BOOL, 0, &queue->skip_agents_with_external_calls, SWITCH_TRUE, NULL, NULL, NULL);
 
-	SWITCH_CONFIG_SET_ITEM(queue->config[i++], "fast_callcenter", SWITCH_CONFIG_BOOL, 0, &queue->c4b_fast_callcenter, SWITCH_FALSE, NULL, NULL, NULL);
+	SWITCH_CONFIG_SET_ITEM(queue->config[i++], "c4b_fast_callcenter", SWITCH_CONFIG_BOOL, 0, &queue->c4b_fast_callcenter, SWITCH_FALSE, NULL, NULL, NULL);
 
 
 	switch_assert(i < CC_QUEUE_CONFIGITEM_COUNT);
@@ -4124,7 +4124,7 @@ SWITCH_STANDARD_JSON_API(json_callcenter_config_function)
 			cJSON_AddItemToObject(o, "record_template", cJSON_CreateString(queue->record_template));
 			cJSON_AddItemToObject(o, "skip_agents_with_external_calls", cJSON_CreateString(queue->skip_agents_with_external_calls ? "true" : "false"));
 			cJSON_AddItemToObject(o, "agent_no_answer_status", cJSON_CreateString(queue->agent_no_answer_status));
-			cJSON_AddItemToObject(o, "fast_callcenter", cJSON_CreateString(queue->c4b_fast_callcenter ? "true" : "false"));
+			cJSON_AddItemToObject(o, "c4b_fast_callcenter", cJSON_CreateString(queue->c4b_fast_callcenter ? "true" : "false"));
 			cJSON_AddItemToArray(reply, o);
 			queue = NULL;
         }
