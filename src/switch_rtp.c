@@ -1236,7 +1236,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 						}
 					}
 				}
-			}
+			}*/
 
 			// This line sends PLI/FIR requests to senders which in turn produce keyframes.
 			// We dont want this to happen every time we send a stun response. Philipp: Convince me otherwise :)
