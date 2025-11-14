@@ -2802,6 +2802,7 @@ conference_obj_t *conference_new(char *name, conference_xml_cfg_t cfg, switch_co
 	char *cdr_event_mode = NULL;
 	char *terminate_on_silence = NULL;
 	char *endconference_grace_time = NULL;
+	switch_bool_t canvas_auto_size_presenter = SWITCH_FALSE;
 	char uuid_str[SWITCH_UUID_FORMATTED_LENGTH+1];
 	switch_uuid_t uuid;
 	switch_codec_implementation_t read_impl = { 0 };
@@ -2970,6 +2971,10 @@ conference_obj_t *conference_new(char *name, conference_xml_cfg_t cfg, switch_co
 				video_letterbox_bgcolor= val;
 			} else if (!video_canvas_size && !strcasecmp(var, "video-canvas-size") && !zstr(val)) {
 				video_canvas_size = val;
+			} else if (!strcasecmp(var, "video-canvas-auto-size") && !zstr(val)) {
+				if (!strcasecmp(val, "presenter") || switch_true(val)) {
+					canvas_auto_size_presenter = SWITCH_TRUE;
+				}
 			} else if (!strcasecmp(var, "video-fps") && !zstr(val)) {
 				fps = (float)atof(val);
 			} else if (!strcasecmp(var, "video-codec-bandwidth") && !zstr(val)) {
@@ -3388,6 +3393,8 @@ conference_obj_t *conference_new(char *name, conference_xml_cfg_t cfg, switch_co
 			conference->canvas_width = canvas_w;
 			conference->canvas_height = canvas_h;
 		}
+
+		conference->canvas_auto_size_presenter = canvas_auto_size_presenter;
 	}
 
 	if (conference->conference_video_mode == CONF_VIDEO_MODE_TRANSCODE || conference->conference_video_mode == CONF_VIDEO_MODE_MUX) {

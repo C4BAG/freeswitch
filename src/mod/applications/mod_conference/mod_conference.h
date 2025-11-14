@@ -652,6 +652,7 @@ typedef struct conference_obj {
 	switch_codec_settings_t video_codec_settings;
 	uint32_t canvas_width;
 	uint32_t canvas_height;
+	switch_bool_t canvas_auto_size_presenter;
 	uint32_t terminate_on_silence;
 	uint32_t max_members;
 	uint32_t doc_version;
@@ -1070,6 +1071,7 @@ void conference_video_check_flush(conference_member_t *member, switch_bool_t for
 void conference_video_set_canvas_letterbox_bgcolor(mcu_canvas_t *canvas, char *color);
 void conference_video_set_canvas_bgcolor(mcu_canvas_t *canvas, char *color);
 void conference_video_scale_and_patch(mcu_layer_t *layer, switch_image_t *ximg, switch_bool_t freeze);
+void conference_handle_video(mcu_layer_t *layer, switch_image_t *ximg, switch_bool_t freeze);
 void conference_video_reset_layer(mcu_layer_t *layer);
 void conference_video_reset_layer_cam(mcu_layer_t *layer);
 void conference_video_clear_layer(mcu_layer_t *layer);

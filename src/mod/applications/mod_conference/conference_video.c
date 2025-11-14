@@ -503,6 +503,71 @@ static void set_bounds(int *x, int *y, int img_w, int img_h, int crop_w, int cro
 
 }
 
+static switch_status_t conference_video_autoscale(mcu_layer_t *layer, switch_image_t *ximg)
+{
+	conference_obj_t *conference;
+	int new_w, new_h;
+	switch_image_t *source;
+
+	if (!layer || !layer->canvas || !layer->canvas->conference || !layer->canvas->conference->canvas_auto_size_presenter) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (!layer->geometry.floor) 
+		return SWITCH_STATUS_SUCCESS;
+
+	switch_mutex_lock(layer->canvas->mutex);
+
+	source = ximg ? ximg : layer->cur_img;
+	conference = layer->canvas->conference;
+
+	new_w = source->d_w;
+	new_h = source->d_h;
+
+	if ((new_w % 2) != 0) new_w++;
+	if ((new_h % 2) != 0) new_h++;
+
+	if (new_w != layer->canvas->width || new_h != layer->canvas->height) {
+
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+			"Conference %s: Auto-resizing canvas %dx%d -> %dx%d\n",
+			conference->name,
+			layer->canvas->width, layer->canvas->height, new_w, new_h);
+
+		layer->canvas->width = new_w;
+		layer->canvas->height = new_h;
+		switch_img_free(&layer->canvas->img);
+		layer->canvas->img = switch_img_alloc(NULL, SWITCH_IMG_FMT_I420, layer->canvas->width, layer->canvas->height, 0);
+
+		conference->canvas_width = new_w;
+		conference->canvas_height = new_h;
+
+		layer->canvas->send_keyframe = 1;
+	}
+
+	/*
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+					  "Conference %s: Auto-resizing canvas image %dx%d patched to %dx%d\n", conference->name,
+					  source->d_w, source->d_h, layer->canvas->width, layer->canvas->height);*/
+
+	switch_img_patch(layer->canvas->img, source, 0, 0);
+	switch_mutex_unlock(layer->canvas->mutex);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+void conference_handle_video(mcu_layer_t *layer, switch_image_t *ximg, switch_bool_t freeze)
+{
+	if (!layer) {
+		return;
+	}
+
+	if (conference_video_autoscale(layer, ximg) == SWITCH_STATUS_SUCCESS) {
+		return;
+	}
+
+	conference_video_scale_and_patch(layer, ximg, freeze);
+}
+
 void conference_video_scale_and_patch(mcu_layer_t *layer, switch_image_t *ximg, switch_bool_t freeze)
 {
 	switch_image_t *IMG, *img;
@@ -2221,7 +2286,7 @@ void *SWITCH_THREAD_FUNC conference_video_layer_thread_run(switch_thread_t *thre
 
 		if (layer) {
 			if (layer->need_patch) {
-				conference_video_scale_and_patch(layer, NULL, SWITCH_FALSE);
+				conference_handle_video(layer, NULL, SWITCH_FALSE);
 				layer->need_patch = 0;
 			}
 		}
@@ -3602,7 +3667,7 @@ void *SWITCH_THREAD_FUNC conference_video_muxing_thread_run(switch_thread_t *thr
 
 							if (layer->mute_img) {
 								conference_video_member_video_mute_banner(layer->mute_img, imember);
-								conference_video_scale_and_patch(layer, layer->mute_img, SWITCH_FALSE);
+								conference_handle_video(layer, layer->mute_img, SWITCH_FALSE);
 							}
 						}
 
@@ -3887,7 +3952,7 @@ void *SWITCH_THREAD_FUNC conference_video_muxing_thread_run(switch_thread_t *thr
 
 						if (layer && use_img) {
 							//switch_img_copy(use_img, &layer->cur_img);
-							conference_video_scale_and_patch(layer, use_img, SWITCH_FALSE);
+							conference_handle_video(layer, use_img, SWITCH_FALSE);
 						}
 						
 					}					
@@ -3910,7 +3975,7 @@ void *SWITCH_THREAD_FUNC conference_video_muxing_thread_run(switch_thread_t *thr
 						switch_img_free(&layer->logo_img);
 						layer->member_id = -1;
 						//switch_img_copy(img, &layer->cur_img);
-						conference_video_scale_and_patch(layer, img, SWITCH_FALSE);
+						conference_handle_video(layer, img, SWITCH_FALSE);
 					}
 				}
 
@@ -4425,7 +4490,12 @@ void *SWITCH_THREAD_FUNC conference_video_super_muxing_thread_run(switch_thread_
 						if (imember->video_codec_index < 0) {
 							canvas->write_codecs[i] = switch_core_alloc(conference->pool, sizeof(codec_set_t));
 							canvas->write_codecs_count = i+1;
-							
+
+							if (conference->video_codec_config_profile_name) {
+								switch_set_string(conference->video_codec_settings.video.config_profile_name,
+												  conference->video_codec_config_profile_name);
+							}
+
 							if (switch_core_codec_copy(check_codec, &canvas->write_codecs[i]->codec,
 													   &conference->video_codec_settings, conference->pool) == SWITCH_STATUS_SUCCESS) {
 								switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
