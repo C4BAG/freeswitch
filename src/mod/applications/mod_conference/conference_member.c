@@ -1310,6 +1310,8 @@ switch_status_t conference_member_del(conference_obj_t *conference, conference_m
 			member->conference->last_video_floor_holder = 0;
 		}
 		member->conference->video_floor_holder = 0;
+		/* Reset presenter ready flag when video floor holder leaves (for auto-size presenter mode) */
+		member->conference->canvas_presenter_ready = SWITCH_FALSE;
 	}
 
 	if (!conference_utils_member_test_flag(member, MFLAG_NOCHANNEL)) {

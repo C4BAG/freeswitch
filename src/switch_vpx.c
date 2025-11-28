@@ -1551,7 +1551,8 @@ static void init_vp9(my_vpx_cfg_t *my_cfg)
 	my_cfg->enc_cfg.g_profile = 0;
 	my_cfg->enc_cfg.g_lag_in_frames = 0;
 	my_cfg->enc_cfg.g_timebase.den = 1000;
-	my_cfg->enc_cfg.g_error_resilient = VPX_ERROR_RESILIENT_PARTITIONS;
+	/* Note: VPX_ERROR_RESILIENT_PARTITIONS is VP8-only, use DEFAULT for VP9 */
+	my_cfg->enc_cfg.g_error_resilient = VPX_ERROR_RESILIENT_DEFAULT;
 	my_cfg->enc_cfg.rc_resize_allowed = 1;
 	my_cfg->enc_cfg.rc_end_usage = VPX_CBR;
 	my_cfg->enc_cfg.rc_target_bitrate = switch_parse_bandwidth_string("1mb");

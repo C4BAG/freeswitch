@@ -551,6 +551,16 @@ static switch_status_t conference_video_autoscale(mcu_layer_t *layer, switch_ima
 					  source->d_w, source->d_h, layer->canvas->width, layer->canvas->height);*/
 
 	switch_img_patch(layer->canvas->img, source, 0, 0);
+
+	/* Mark presenter as ready after first valid frame is patched to canvas */
+	if (!conference->canvas_presenter_ready) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+			"Conference %s: First presenter frame received (%dx%d), enabling video output to viewers\n",
+			conference->name, source->d_w, source->d_h);
+		conference->canvas_presenter_ready = SWITCH_TRUE;
+		layer->canvas->send_keyframe = 1;
+	}
+
 	switch_mutex_unlock(layer->canvas->mutex);
 	return SWITCH_STATUS_SUCCESS;
 }
@@ -1931,6 +1941,11 @@ void conference_video_write_canvas_image_to_codec_group(conference_obj_t *confer
 	switch_frame_t write_frame = { 0 }, *frame = NULL;
 	switch_status_t encode_status = SWITCH_STATUS_FALSE;
 	switch_image_t *scaled_img = codec_set->scaled_img;
+
+	/* In auto-size presenter mode, don't send video until presenter has sent first valid frame */
+	if (conference->canvas_auto_size_presenter && !conference->canvas_presenter_ready) {
+		return;
+	}
 
 	write_frame = codec_set->frame;
 	frame = &write_frame;

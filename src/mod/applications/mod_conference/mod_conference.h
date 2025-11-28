@@ -653,6 +653,7 @@ typedef struct conference_obj {
 	uint32_t canvas_width;
 	uint32_t canvas_height;
 	switch_bool_t canvas_auto_size_presenter;
+	switch_bool_t canvas_presenter_ready;  /* Set to TRUE when first valid presenter frame is received */
 	uint32_t terminate_on_silence;
 	uint32_t max_members;
 	uint32_t doc_version;
