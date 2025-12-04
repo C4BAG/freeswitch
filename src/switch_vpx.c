@@ -64,6 +64,8 @@ typedef struct my_vpx_cfg_s {
 	int noise_sensitivity;
 	int max_intra_bitrate_pct;
 	vp9e_tune_content tune_content;
+	unsigned int aq_mode;  /* VP9 Adaptive Quantization Mode (0=NO_AQ, 3=CYCLIC_REFRESH recommended for CBR) */
+	unsigned int frame_periodic_boost;  /* VP9 Frame Periodic Boost (0=off for stable bitrate, 1=on default) */
 
 	vpx_codec_enc_cfg_t enc_cfg;
 	vpx_codec_dec_cfg_t dec_cfg;
@@ -84,6 +86,8 @@ static void show_config(my_vpx_cfg_t *my_cfg, vpx_codec_enc_cfg_t *cfg)
 	SHOW(my_cfg, noise_sensitivity);
 	SHOW(my_cfg, max_intra_bitrate_pct);
 	SHOW(my_cfg, tune_content);
+	SHOW(my_cfg, aq_mode);
+	SHOW(my_cfg, frame_periodic_boost);
 
 	SHOW(cfg, g_usage);
 	SHOW(cfg, g_threads);
@@ -646,17 +650,32 @@ static switch_status_t init_encoder(switch_codec_t *codec)
 		vpx_codec_control(&context->encoder, VP8E_SET_STATIC_THRESHOLD, my_cfg->static_thresh);
 
 		if (context->is_vp9) {
+			vpx_codec_err_t aq_err;
+
 			if (my_cfg->lossless) {
 				vpx_codec_control(&context->encoder, VP9E_SET_LOSSLESS, 1);
 			}
 
 			vpx_codec_control(&context->encoder, VP9E_SET_TUNE_CONTENT, my_cfg->tune_content);
+			aq_err = vpx_codec_control(&context->encoder, VP9E_SET_AQ_MODE, my_cfg->aq_mode);
+			if (aq_err == VPX_CODEC_OK) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(codec->session), SWITCH_LOG_INFO,
+					"VP9 AQ_MODE set to %u (0=NO_AQ, 3=CYCLIC_REFRESH)\n", my_cfg->aq_mode);
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(codec->session), SWITCH_LOG_ERROR,
+					"VP9 AQ_MODE failed to set %u: %s\n", my_cfg->aq_mode, vpx_codec_err_to_string(aq_err));
+			}
+
+			vpx_codec_control(&context->encoder, VP9E_SET_FRAME_PERIODIC_BOOST, my_cfg->frame_periodic_boost);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(codec->session), SWITCH_LOG_DEBUG,
+				"VP9 FRAME_PERIODIC_BOOST set to %u (0=off for stable CBR, 1=on)\n", my_cfg->frame_periodic_boost);
 		} else {
 			vpx_codec_control(&context->encoder, VP8E_SET_NOISE_SENSITIVITY, my_cfg->noise_sensitivity);
+		}
 
-			if (my_cfg->max_intra_bitrate_pct) {
-				vpx_codec_control(&context->encoder, VP8E_SET_MAX_INTRA_BITRATE_PCT, my_cfg->max_intra_bitrate_pct);
-			}
+		/* max_intra_bitrate_pct is supported by both VP8 and VP9 */
+		if (my_cfg->max_intra_bitrate_pct) {
+			vpx_codec_control(&context->encoder, VP8E_SET_MAX_INTRA_BITRATE_PCT, my_cfg->max_intra_bitrate_pct);
 		}
 	}
 
@@ -735,11 +754,37 @@ static switch_status_t consume_partition(vpx_context_t *context, switch_frame_t 
 		remaining_bytes = switch_buffer_inuse(context->pbuffer);
 	}
 
-	if (!context->pkt || context->pkt->kind != VPX_CODEC_CX_FRAME_PKT || !remaining_bytes) {
+	if (!context->pkt) {
+		/* Encoder returned NULL - frame was dropped by rate control (rc_dropframe_thresh) */
+		frame->datalen = 0;
+		frame->m = 1;
+		//switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "VPX: Frame dropped by encoder (rate control)\n");
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	if (context->pkt->kind != VPX_CODEC_CX_FRAME_PKT) {
+		/* Encoder returned a non-frame packet (e.g. statistics for two-pass encoding) */
+		const char *pkt_type;
+		switch (context->pkt->kind) {
+			case VPX_CODEC_STATS_PKT:      pkt_type = "STATS_PKT (two-pass stats)"; break;
+			case VPX_CODEC_FPMB_STATS_PKT: pkt_type = "FPMB_STATS_PKT (first-pass MB stats)"; break;
+			case VPX_CODEC_PSNR_PKT:       pkt_type = "PSNR_PKT (quality stats)"; break;
+			default:                       pkt_type = "CUSTOM/UNKNOWN"; break;
+		}
+		frame->datalen = 0;
+		frame->m = 1;
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+			"VPX: Non-frame packet received: %s (kind=%d)\n", pkt_type, (int)context->pkt->kind);
+		context->pkt = NULL;
+		return SWITCH_STATUS_SUCCESS;
+	}
+
+	if (!remaining_bytes) {
+		/* Frame packet exists but has no payload - unusual condition */
 		frame->datalen = 0;
 		frame->m = 1;
 		context->pkt = NULL;
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "writing 0 bytes\n");
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "VPX: Frame packet with 0 bytes payload\n");
 		return SWITCH_STATUS_SUCCESS;
 	}
 
@@ -1564,6 +1609,7 @@ static void init_vp9(my_vpx_cfg_t *my_cfg)
 	my_cfg->enc_cfg.rc_buf_optimal_sz = 1000;
 	my_cfg->enc_cfg.kf_max_dist = 360;
 	my_cfg->tune_content = VP9E_CONTENT_SCREEN;
+	my_cfg->aq_mode = 3;  /* CYCLIC_REFRESH_AQ - recommended for CBR/realtime */
 }
 
 static my_vpx_cfg_t *find_cfg_profile(const char *name, switch_bool_t reconfig)
@@ -1804,11 +1850,8 @@ static void parse_profile(my_vpx_cfg_t *my_cfg, switch_xml_t profile, int codec_
 				_VPX_CHECK_ERRDEF_NOTAPPL(my_cfg->noise_sensitivity);
 			}
 		} else if (!strcmp(name, "max-intra-bitrate-pct")) {
-			if (codec_type == CODEC_TYPE_VP8) {
-				_VPX_CHECK_MIN(my_cfg->max_intra_bitrate_pct, val, 0);
-			} else {
-				_VPX_CHECK_ERRDEF_NOTAPPL(my_cfg->max_intra_bitrate_pct);
-			}
+			/* Supported by both VP8 and VP9 - limits keyframe size as percentage of avg per-frame bitrate */
+			_VPX_CHECK_MIN(my_cfg->max_intra_bitrate_pct, val, 0);
 		} else if (!strcmp(name, "vp9e-tune-content")) {
 			if (codec_type == CODEC_TYPE_VP9) {
 				if (!strcasecmp(value, "DEFAULT")) {
@@ -1820,6 +1863,21 @@ static void parse_profile(my_vpx_cfg_t *my_cfg, switch_xml_t profile, int codec_
 				}
 			} else {
 				_VPX_CHECK_ERRDEF_NOTAPPL(my_cfg->tune_content);
+			}
+		} else if (!strcmp(name, "vp9e-aq-mode")) {
+			if (codec_type == CODEC_TYPE_VP9) {
+				/* 0=NO_AQ, 1=VARIANCE_AQ, 2=COMPLEXITY_AQ, 3=CYCLIC_REFRESH_AQ (recommended for CBR),
+				   4=EQUATOR360_AQ, 5=PERCEPTUAL_AQ, 6=PSNR_AQ. Mode 7 (LOOKAHEAD_AQ) not for realtime. */
+				_VPX_CHECK_MIN_MAX(my_cfg->aq_mode, val, 0, 6);
+			} else {
+				_VPX_CHECK_ERRDEF_NOTAPPL(my_cfg->aq_mode);
+			}
+		} else if (!strcmp(name, "vp9e-frame-periodic-boost")) {
+			if (codec_type == CODEC_TYPE_VP9) {
+				/* 0=off (stable bitrate for CBR), 1=on (periodic quality boost, default) */
+				_VPX_CHECK_MIN_MAX(my_cfg->frame_periodic_boost, val, 0, 1);
+			} else {
+				_VPX_CHECK_ERRDEF_NOTAPPL(my_cfg->frame_periodic_boost);
 			}
 		}
 	} // for param
