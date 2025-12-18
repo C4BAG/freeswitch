@@ -868,9 +868,12 @@ switch_status_t conference_member_add(conference_obj_t *conference, conference_m
 			if ((var = switch_channel_get_variable(member->channel, "rtp_video_max_bandwidth_out"))) {
 				member->max_bw_out = switch_parse_bandwidth_string(var);
 
-				if (member->max_bw_out < conference->video_codec_settings.video.bandwidth) {
+				if ((member->max_bw_out > 0) && (member->max_bw_out < conference->video_codec_settings.video.bandwidth)) {
 					conference_utils_member_set_flag_locked(member, MFLAG_NO_MINIMIZE_ENCODING);
 					bitrate = member->max_bw_out;
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+									  "Member %d: MFLAG_NO_MINIMIZE_ENCODING set. max_bw_out = %d video.bandwidth = %d\n", member->id,
+									  member->max_bw_out, conference->video_codec_settings.video.bandwidth);
 				}
 			}
 			
@@ -1307,6 +1310,8 @@ switch_status_t conference_member_del(conference_obj_t *conference, conference_m
 			member->conference->last_video_floor_holder = 0;
 		}
 		member->conference->video_floor_holder = 0;
+		/* Reset presenter ready flag when video floor holder leaves (for auto-size presenter mode) */
+		member->conference->canvas_presenter_ready = SWITCH_FALSE;
 	}
 
 	if (!conference_utils_member_test_flag(member, MFLAG_NOCHANNEL)) {

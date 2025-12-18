@@ -8758,11 +8758,15 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 				
 				if ((var = switch_channel_get_variable(channel, "rtp_nack_buffer_size"))) {
 					int tmp = atoi(var);
-					
-					if (tmp > 0 && tmp < 500) {
-						nack_size = tmp;
-					}
+					if (tmp <= 0) 
+						tmp = 100;
+					else if (tmp > 1000)
+						tmp = 1000;
+					nack_size = tmp;
 				}
+
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO,
+							  "NACK buffer size: %d\n", nack_size);
 
 				switch_jb_create(&rtp_session->vbw, SJB_VIDEO, nack_size, nack_size, rtp_session->pool);
 
