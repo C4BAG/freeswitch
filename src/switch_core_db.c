@@ -254,8 +254,28 @@ SWITCH_DECLARE(switch_core_db_t *) switch_core_db_open_in_memory(const char *uri
 {
 	switch_core_db_t *db;
 	int db_ret;
+	char mem_uri[256];
+	const char *effective_uri;
 
-	if ((db_ret = switch_core_db_open_v2(uri, &db)) != SQLITE_OK) {
+	/* Convert simple name to SQLite in-memory URI format.
+	 * Only convert if uri is a simple name:
+	 * - no "file:" prefix (already a URI)
+	 * - doesn't start with ":" (special name like ":memory:")
+	 * - no "?" (has query parameters)
+	 * Empty or NULL uri defaults to shared anonymous in-memory DB.
+	 */
+	if (zstr(uri)) {
+		effective_uri = "file::memory:?cache=shared";
+	} else if (strncasecmp(uri, "file:", 5) != 0 &&
+		uri[0] != ':' &&
+		strchr(uri, '?') == NULL) {
+		snprintf(mem_uri, sizeof(mem_uri), "file:%s?mode=memory&cache=shared", uri);
+		effective_uri = mem_uri;
+	} else {
+		effective_uri = uri;
+	}
+
+	if ((db_ret = switch_core_db_open_v2(effective_uri, &db)) != SQLITE_OK) {
 		goto end;
 	}
 	if ((db_ret = switch_core_db_connection_setup(db, SWITCH_TRUE)) != SQLITE_OK) {
