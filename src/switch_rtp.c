@@ -263,6 +263,7 @@ typedef struct {
 	char last_sent_id[13];
 	switch_time_t last_ok;
 	uint8_t cand_responsive;
+	uint64_t tiebreaker;
 } switch_rtp_ice_t;
 
 struct switch_rtp;
@@ -589,7 +590,7 @@ static void switch_rtp_change_ice_dest(switch_rtp_t *rtp_session, switch_rtp_ice
 
 static int switch_rtp_ice_acl_check(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, const char *host, switch_port_t port)
 {
-	int is_rtcp; 
+	int is_rtcp;
 	int i;
 	switch_status_t st;
 	char acl_passed;
@@ -971,9 +972,9 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 		switch_stun_packet_attribute_add_software(packet, sw, (uint16_t)strlen(sw));
 
 		if ((ice->type & ICE_CONTROLLED)) {
-			switch_stun_packet_attribute_add_controlled(packet);
+			switch_stun_packet_attribute_add_controlled(packet, ice->tiebreaker);
 		} else {
-			switch_stun_packet_attribute_add_controlling(packet);
+			switch_stun_packet_attribute_add_controlling(packet, ice->tiebreaker);
 			switch_stun_packet_attribute_add_use_candidate(packet);
 		}
 
@@ -1016,7 +1017,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 	switch_size_t cpylen = len;
 	int xlen = 0;
 	int ok = 1;
-	uint32_t *pri = NULL;
+	//uint32_t *pri = NULL; // pointer to priority and converted with ntohl, bug(?) used also without ntohl for comparison to priority
 	int is_rtcp = ice == &rtp_session->rtcp_ice;
 	switch_channel_t *channel;
 	int i;
@@ -1024,7 +1025,12 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 	const char *from_host = NULL;
 	switch_port_t from_port = 0;
 	char faddr_buf[80] = "";
+	uint16_t controlling_controlled = 0;
+	uint64_t controlling_controlled_tiebreaker = 0;
+	uint32_t stun_error = 0;
+	uint32_t stun_error_response = 0;
 
+	uint32_t stun_message_priority = 0;
 	if (is_rtcp) {
 		from_addr = rtp_session->rtcp_from_addr;
 	}
@@ -1060,7 +1066,6 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 	if (!packet) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_ERROR, "Invalid STUN/ICE packet received %ld bytes\n", (long)cpylen);
 		goto end;
-
 	}
 
 	rtp_session->last_stun = switch_micro_time_now();
@@ -1074,8 +1079,8 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 	end_buf = buf + ((sizeof(buf) > packet->header.length) ? packet->header.length : sizeof(buf));
 
 	switch_stun_packet_first_attribute(packet, attr);
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "%s STUN PACKET TYPE: %s\n",
-					  rtp_type(rtp_session), switch_stun_value_to_name(SWITCH_STUN_TYPE_PACKET_TYPE, packet->header.type));
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "%s STUN PACKET TYPE: %s from %s\n",
+					  rtp_type(rtp_session), switch_stun_value_to_name(SWITCH_STUN_TYPE_PACKET_TYPE, packet->header.type), from_host);
 	do {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "|---: %s STUN ATTR %d %x %s\n", rtp_type(rtp_session), attr->type, attr->type,
 						  switch_stun_value_to_name(SWITCH_STUN_TYPE_ATTRIBUTE, attr->type));
@@ -1102,18 +1107,18 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 								  rtp_type(rtp_session),
 								  code
 								  );
-
-				if ((ice->type & ICE_VANILLA) && code == 487) {
-					if ((ice->type & ICE_CONTROLLED)) {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN Changing role to CONTROLLING\n", rtp_type(rtp_session));
-						ice->type &= ~ICE_CONTROLLED;
-					} else {
-						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN Changing role to CONTROLLED\n", rtp_type(rtp_session));
-						ice->type |= ICE_CONTROLLED;
-					}
-					packet->header.type = SWITCH_STUN_BINDING_RESPONSE;
-				}
-
+				stun_error = code;
+				// according to RFC 8445 the required action depends on the delivered controlling/controlled and the tiebreaker
+				//if ((ice->type & ICE_VANILLA) && code == 487) {
+				//	if ((ice->type & ICE_CONTROLLED)) {
+				//		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN Changing role to CONTROLLING\n", rtp_type(rtp_session));
+				//		ice->type &= ~ICE_CONTROLLED;
+				//	} else {
+				//		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN Changing role to CONTROLLED\n", rtp_type(rtp_session));
+				//		ice->type |= ICE_CONTROLLED;
+				//	}
+				//	packet->header.type = SWITCH_STUN_BINDING_RESPONSE;
+				//}
 			}
 			break;
 		case SWITCH_STUN_ATTR_MAPPED_ADDRESS:
@@ -1138,14 +1143,22 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "|------: %s\n", username);
 			}
 			break;
-
 		case SWITCH_STUN_ATTR_PRIORITY:
 			{
-				uint32_t priority = 0;
-				pri = (uint32_t *) attr->value;
-				priority = ntohl(*pri);
+			    uint32_t* pri = (uint32_t *)attr->value;
+				uint32_t priority = ntohl(*pri);
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "|------: %u\n", priority);
-				ok = priority == ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].priority;
+				stun_message_priority = priority;
+				ok = stun_message_priority == ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].priority;
+		    }
+		    break;
+		case SWITCH_STUN_ATTR_CONTROLLED:
+		case SWITCH_STUN_ATTR_CONTROLLING:
+			{
+				controlling_controlled = attr->type;
+				uint64_t *tiebreaker = (uint64_t*)attr->value;
+				controlling_controlled_tiebreaker = ntohll(*tiebreaker);
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8, "|------: tiebreaker: %llu\n", controlling_controlled_tiebreaker);			
 			}
 			break;
 		}
@@ -1161,7 +1174,51 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 		goto end; // ToDo: Response?: See RFC 8445: If the controlled agent does not accept the request from the
 		          // controlling agent, the controlled agent MUST reject the nomination request
 		          // with an appropriate error code response (e.g., 400)
-	}
+    }
+	
+	if (ice->type & ICE_VANILLA) {
+		// according to RFC 8445 the required action depends on the delivered controlling/controlled and the tiebreaker
+		if (stun_error == 487) {
+			if ((ice->type & ICE_CONTROLLED) && controlling_controlled == SWITCH_STUN_ATTR_CONTROLLED) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN Changing role to CONTROLLING\n", rtp_type(rtp_session));
+				ice->type &= ~ICE_CONTROLLED;
+				if (controlling_controlled_tiebreaker < ULLONG_MAX) {
+					ice->tiebreaker = controlling_controlled_tiebreaker + 1;
+				}
+			} else if (!(ice->type & ICE_CONTROLLED) && controlling_controlled == SWITCH_STUN_ATTR_CONTROLLING) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN Changing role to CONTROLLED\n", rtp_type(rtp_session));
+				ice->type |= ICE_CONTROLLED;
+				if (controlling_controlled_tiebreaker > 0) {
+					ice->tiebreaker = controlling_controlled_tiebreaker - 1;
+				}
+			} else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN error 487 ignored!\n", rtp_type(rtp_session));
+			}
+			packet->header.type = SWITCH_STUN_BINDING_RESPONSE; // process received SWITCH_STUN_BINDING_ERROR_RESPONSE like SWITCH_STUN_BINDING_RESPONSE in the next steps
+		} else if (controlling_controlled == SWITCH_STUN_ATTR_CONTROLLING && !(ice->type & ICE_CONTROLLED)) {
+		
+			if (ice->tiebreaker >= controlling_controlled_tiebreaker) {
+				// generate SWITCH_STUN_BINDING_ERROR_RESPONSE 487, keep own role
+				stun_error_response = 487;
+				ok = 1;
+			}
+			else {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN Changing role to CONTROLLED\n", rtp_type(rtp_session));
+				ice->type |= ICE_CONTROLLED;
+			}
+		} else if (controlling_controlled == SWITCH_STUN_ATTR_CONTROLLED && (ice->type & ICE_CONTROLLED)) {
+			if (ice->tiebreaker >= controlling_controlled_tiebreaker) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN Changing role to CONTROLLING\n", rtp_type(rtp_session));
+				ice->type &= ~ICE_CONTROLLED;
+			}
+			else {
+				// generate SWITCH_STUN_BINDING_ERROR_RESPONSE 487, keep own role
+				stun_error_response = 487;
+				ok = 1;
+			}
+		} 
+		// after role change some actions required: renew pair priority, check the related pair, ...
+	}	
 
 	if ((ice->type & ICE_GOOGLE_JINGLE) && ok) {
 		ok = !strcmp(ice->user_ice, username);
@@ -1201,14 +1258,14 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 			}
 
 			// This line sends PLI/FIR requests to senders which in turn produce keyframes.
-			// We dont want this to happen every time we send a stun response. Philipp: Convince me otherwise :)
+			// We don't want this to happen every time we send a stun response. Philipp: Convince me otherwise :)
 			/*if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
 				switch_core_session_video_reinit(rtp_session->session);
 			}*/
 		}
 
-		if (!ok && ice == &rtp_session->ice && rtp_session->rtcp_ice.ice_params && pri &&
-			*pri == rtp_session->rtcp_ice.ice_params->cands[rtp_session->rtcp_ice.ice_params->chosen[1]][1].priority) {
+		if (!ok && ice == &rtp_session->ice && rtp_session->rtcp_ice.ice_params && stun_message_priority &&
+			stun_message_priority == rtp_session->rtcp_ice.ice_params->cands[rtp_session->rtcp_ice.ice_params->chosen[1]][1].priority) {
 			ice = &rtp_session->rtcp_ice;
 			ok = 1;
 		}
@@ -1229,7 +1286,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 			switch_port_t port = 0;
 			char *host = NULL;
 
-			if (rtp_session->elapsed_stun > STUN_TOO_LONG && pri) {
+			if (rtp_session->elapsed_stun > STUN_TOO_LONG && stun_message_priority) {
 				int i, j;
 				uint32_t old;
 				//const char *tx_host;
@@ -1254,7 +1311,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 						continue;
 					}
 					for (i = 0; i < icep[j]->ice_params->cand_idx[icep[j]->proto]; i++) {
-						if (icep[j]->ice_params &&  icep[j]->ice_params->cands[i][icep[j]->proto].priority == *pri) {
+						if (icep[j]->ice_params &&  icep[j]->ice_params->cands[i][icep[j]->proto].priority == stun_message_priority) {
 							if (j == IPR_RTP) {
 								icep[j]->ice_params->chosen[j] = i;
 								switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_INFO, "Change candidate index to %d\n", i);
@@ -1356,7 +1413,23 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 			}
 
 			memset(stunbuf, 0, sizeof(stunbuf));
-			rpacket = switch_stun_packet_build_header(SWITCH_STUN_BINDING_RESPONSE, packet->header.id, stunbuf);
+			rpacket = switch_stun_packet_build_header(stun_error_response ? SWITCH_STUN_BINDING_ERROR_RESPONSE : SWITCH_STUN_BINDING_RESPONSE, packet->header.id, stunbuf);
+
+			if (stun_error_response) { 
+				if (stun_error_response == 487) {
+					if (ice->type & ICE_CONTROLLED) {
+						switch_stun_packet_attribute_add_controlled(rpacket, ice->tiebreaker);
+						switch_stun_packet_attribute_add_error(rpacket, stun_error_response, "Ice Role Conflict. Both peers assume the controlled role, but this entity won the tie-breaker.");
+					} else {
+						switch_stun_packet_attribute_add_controlling(rpacket, ice->tiebreaker);
+						switch_stun_packet_attribute_add_error(rpacket, stun_error_response, "Ice Role Conflict. Both peers assume the controlling role, but this entity won the tie-breaker.");
+					}
+				}
+				else {
+					switch_stun_packet_attribute_add_error(rpacket, stun_error_response, "");
+				}
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "%s STUN Returning error %d\n", rtp_type(rtp_session), stun_error_response);
+			}
 
 			if ((ice->type & ICE_GOOGLE_JINGLE)) {
 				switch_stun_packet_attribute_add_username(rpacket, username, (uint16_t)strlen(username));
@@ -1372,6 +1445,10 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 			}
 
 			bytes = switch_stun_packet_length(rpacket);
+
+			if (stun_error_response) { 
+				goto response; 
+			}
 
 			host2 = switch_get_addr(buf2, sizeof(buf2), ice->addr);
 			port2 = switch_sockaddr_get_port(ice->addr);
@@ -1512,6 +1589,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 
 				ice->last_ok = now;
 			}
+response:
 			//if (cmp) {
 			switch_socket_sendto(sock_output, from_addr, 0, (void *) rpacket, &bytes);
 			//}
@@ -1537,12 +1615,8 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
 							  "STUN/ICE binding error received on %s channel\n", rtp_type(rtp_session));
 		}
-
 	}
-
-
-
-
+	
  end:
 	switch_mutex_unlock(rtp_session->ice_mutex);
 	WRITE_DEC(rtp_session);
@@ -5037,6 +5111,10 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 	ice->rpass = "";
 	ice->next_run = switch_micro_time_now();
 	ice->initializing = 1;
+	if (type & ICE_CONTROLLED)
+		ice->tiebreaker = 0; //we intend to be always breakable! 
+	else
+		ice->tiebreaker = switch_stun_random_tiebreaker();
 
 	if (password) {
 		ice->pass = switch_core_strdup(rtp_session->pool, password);
