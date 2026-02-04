@@ -37,6 +37,24 @@
 #ifndef FREESWITCH_STUN_PARSER_H
 #define FREESWITCH_STUN_PARSER_H
 
+/*
+ * 64-bit network byte-order helpers for the ICE tiebreaker (RFC 8445). winsock2.h
+ * provides htonll/ntohll on Windows; glibc and most other platforms do not, so
+ * provide a portable fallback built from the 32-bit htonl (correct on little- and
+ * big-endian) to keep this a cross-platform build. Only the plain-variable call
+ * sites in switch_stun.c/switch_rtp.c use these, so the macro arg is never a
+ * side-effecting expression.
+ */
+#ifndef _WIN32
+#include <arpa/inet.h>
+#ifndef htonll
+#define htonll(x) ((((uint64_t)htonl((uint32_t)((x) & 0xFFFFFFFFULL))) << 32) | htonl((uint32_t)((x) >> 32)))
+#endif
+#ifndef ntohll
+#define ntohll(x) htonll(x)
+#endif
+#endif
+
 SWITCH_BEGIN_EXTERN_C
 #define SWITCH_STUN_DEFAULT_PORT 3478
 #define SWITCH_STUN_PACKET_MIN_LEN 20
@@ -177,6 +195,11 @@ typedef struct {
 */
 SWITCH_DECLARE(void) switch_stun_random_string(char *buf, uint16_t len, char *set);
 
+/*
+  \brief Generate a random value for tiebreaker RFC 8445 "64bit unsigned integer"
+ */
+SWITCH_DECLARE(uint64_t) switch_stun_random_tiebreaker(void);
+
 /*!
   \brief Prepare a raw packet for parsing
   \param buf the raw data
@@ -249,9 +272,10 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_integrity(switch_stun_p
 SWITCH_DECLARE(uint32_t) switch_crc32_8bytes(const void* data, size_t length);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_fingerprint(switch_stun_packet_t *packet);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_use_candidate(switch_stun_packet_t *packet);
-SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlling(switch_stun_packet_t *packet);
-SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlled(switch_stun_packet_t *packet);
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlling(switch_stun_packet_t *packet, uint64_t tiebreaker);
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlled(switch_stun_packet_t *packet, uint64_t tiebreaker);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_priority(switch_stun_packet_t *packet, uint32_t priority);
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_error(switch_stun_packet_t *packet, uint32_t code, char *reason);
 
 /*!
   \brief Perform a stun lookup
