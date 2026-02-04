@@ -3895,7 +3895,7 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_check_ice_acl(switch_core_sess
 
 	for (int ai = 0; ai < engine->cand_acl_count; ai++) {
 		if (switch_check_network_list_ip(addr, engine->cand_acl[ai])) {
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG6, "Candidate %s (%s) passed user acl \"%s\" (%d of %d)\n", addr, switch_media_type2str(type), engine->cand_acl[ai], ai, engine->cand_acl_count);
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG6, "Candidate %s (%s) passed user acl \"%s\" (%d of %d)\n", addr, switch_media_type2str(type), engine->cand_acl[ai], ai + 1, engine->cand_acl_count);
 			return SWITCH_STATUS_SUCCESS;
 		}
 	}
@@ -3996,11 +3996,16 @@ static switch_core_media_ice_type_t switch_determine_ice_type(switch_rtp_engine_
 	if (switch_channel_var_true(session->channel, "ice_lite")) {
 		ice_type |= ICE_CONTROLLED;
 		ice_type |= ICE_LITE;
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG8, "Ice-Type from channel-variable 'ice_lite': ice_type: %d\n", ice_type);
+	} else if (switch_channel_var_true(session->channel, "ice_controlled")) { 
+		ice_type |= ICE_CONTROLLED; 
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG8, "Ice-Type from channel-variable 'ice_controlled': ice_type: %d\n", ice_type);
 	} else {
 		switch_call_direction_t direction = switch_ice_direction(engine, session);
 		if (direction == SWITCH_CALL_DIRECTION_INBOUND) {
 			ice_type |= ICE_CONTROLLED;
 		}
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG8, "Ice-Type from direction '%s': ice_type: %d\n", direction == SWITCH_CALL_DIRECTION_INBOUND? "inbound" : "outbound", ice_type);
 	}
 
 	return ice_type;

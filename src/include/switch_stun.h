@@ -177,6 +177,11 @@ typedef struct {
 */
 SWITCH_DECLARE(void) switch_stun_random_string(char *buf, uint16_t len, char *set);
 
+/*
+  \brief Generate a random value for tiebreaker RFC 8445 "64bit unsigned integer"
+ */
+SWITCH_DECLARE(uint64_t) switch_stun_random_tiebreaker(void);
+
 /*!
   \brief Prepare a raw packet for parsing
   \param buf the raw data
@@ -249,9 +254,10 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_integrity(switch_stun_p
 SWITCH_DECLARE(uint32_t) switch_crc32_8bytes(const void* data, size_t length);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_fingerprint(switch_stun_packet_t *packet);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_use_candidate(switch_stun_packet_t *packet);
-SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlling(switch_stun_packet_t *packet);
-SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlled(switch_stun_packet_t *packet);
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlling(switch_stun_packet_t *packet, uint64_t tiebreaker);
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlled(switch_stun_packet_t *packet, uint64_t tiebreaker);
 SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_priority(switch_stun_packet_t *packet, uint32_t priority);
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_error(switch_stun_packet_t *packet, uint32_t code, char *reason);
 
 /*!
   \brief Perform a stun lookup

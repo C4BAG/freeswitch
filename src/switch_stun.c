@@ -140,6 +140,18 @@ SWITCH_DECLARE(void) switch_stun_random_string(char *buf, uint16_t len, char *se
 	}
 }
 
+SWITCH_DECLARE(uint64_t) switch_stun_random_tiebreaker(void)
+{
+	int64_t ret = 0;
+	while (ret == 0) {
+		ret = ((long long)rand() << 32) | rand();
+	}
+	// we don't want values in this range because some stacks are working with int64 instead of uint64 -> compare will result in unexpected behavior
+	if (ret < 0) { 
+		return -ret; 
+	}
+	return ret;
+}
 
 SWITCH_DECLARE(switch_stun_packet_t *) switch_stun_packet_parse(uint8_t *buf, uint32_t len)
 {
@@ -289,8 +301,9 @@ SWITCH_DECLARE(switch_stun_packet_t *) switch_stun_packet_parse(uint8_t *buf, ui
 			break;
 		case SWITCH_STUN_ATTR_ERROR_CODE:	/* ErrorCode */
 			{
+			    // why no length checking?
 				uint32_t *u = (uint32_t *) attr->value;
-				*u = htonl(*u);
+				*u = ntohl(*u); /* should we do this here? */
 			}
 			break;
 
@@ -579,32 +592,34 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_use_candidate(switch_st
 	return 1;
 }
 
-SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlling(switch_stun_packet_t *packet)
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlling(switch_stun_packet_t *packet, uint64_t tiebreaker)
 {
 	switch_stun_packet_attribute_t *attribute;
-	char buf[8];
-
-	switch_stun_random_string(buf, 8, NULL);
+	//char buf[8];
+	
+	//switch_stun_random_string(buf, 8, NULL);
+	tiebreaker = htonll(tiebreaker);
 
 	attribute = (switch_stun_packet_attribute_t *) ((uint8_t *) & packet->first_attribute + ntohs(packet->header.length));
 	attribute->type = htons(SWITCH_STUN_ATTR_CONTROLLING);
 	attribute->length = htons(8);
-	memcpy(attribute->value, buf, 8);
+	memcpy(attribute->value, &tiebreaker, 8);
 	packet->header.length += htons(sizeof(switch_stun_packet_attribute_t)) + attribute->length;
 	return 1;
 }
 
-SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlled(switch_stun_packet_t *packet)
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_controlled(switch_stun_packet_t *packet, uint64_t tiebreaker)
 {
 	switch_stun_packet_attribute_t *attribute;
-	char buf[8];
+	//char buf[8];
 
-	switch_stun_random_string(buf, 8, NULL);
+	//switch_stun_random_string(buf, 8, NULL);
+	tiebreaker = htonll(tiebreaker);
 
 	attribute = (switch_stun_packet_attribute_t *) ((uint8_t *) & packet->first_attribute + ntohs(packet->header.length));
 	attribute->type = htons(SWITCH_STUN_ATTR_CONTROLLED);
 	attribute->length = htons(8);
-	memcpy(attribute->value, buf, 8);
+	memcpy(attribute->value, &tiebreaker, 8);
 	packet->header.length += htons(sizeof(switch_stun_packet_attribute_t)) + attribute->length;
 	return 1;
 }
@@ -676,6 +691,53 @@ SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_password(switch_stun_pa
 	} else {
 		switch_stun_random_string(attribute->value, ulen, NULL);
 	}
+
+	packet->header.length += htons((u_short)(sizeof(switch_stun_packet_attribute_t) + padding)) + attribute->length;
+
+	return 1;
+}
+
+#ifndef MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+
+SWITCH_DECLARE(uint8_t) switch_stun_packet_attribute_add_error(switch_stun_packet_t *packet, uint32_t code, char *reason)
+{
+	switch_stun_packet_attribute_t *attribute;
+	switch_stun_error_code_t *error;
+	uint32_t *pcode;
+	uint16_t length = 4;
+	int padding = 0;
+
+	// max 11 bit allowed
+	code = code & 0xFFF;
+
+	attribute = (switch_stun_packet_attribute_t *) ((uint8_t *) & packet->first_attribute + ntohs(packet->header.length));
+	attribute->type = htons(SWITCH_STUN_ATTR_ERROR_CODE);
+	//attribute->length = htons(sizeof(switch_stun_error_code_t));
+
+	error = (switch_stun_error_code_t*)attribute->value;
+	error->padding = 0;
+	error->code = code / 100; // called "class" in RFC
+	error->number = code % 100;
+	
+	if (reason) {
+		uint16_t len, m;
+		len = MIN((uint16_t)strlen(reason), 128); // max 128 characters
+		memcpy(error->reason, reason, len);
+		error->reason[len] = 0;
+		length += len;
+		m = len % 4;
+		if (m) {
+			padding = 4 - m;
+		}
+	} 
+
+	attribute->length = htons(length);
+
+	// ?? we do here the inverse of what is done in switch_stun_package_parse
+	pcode = (uint32_t *)attribute->value;
+	*pcode = htonl(*pcode);
 
 	packet->header.length += htons((u_short)(sizeof(switch_stun_packet_attribute_t) + padding)) + attribute->length;
 
