@@ -258,11 +258,11 @@ typedef struct {
 	uint8_t sending;
 	uint8_t ready;
 	uint8_t rready;
-	uint8_t init;
+	uint8_t initializing;
 	int missed_count;
 	char last_sent_id[13];
 	switch_time_t last_ok;
-	//uint8_t cand_responsive;
+	uint8_t cand_responsive;
 } switch_rtp_ice_t;
 
 struct switch_rtp;
@@ -406,7 +406,6 @@ struct switch_rtp {
 	char *eff_remote_host_str;
 	switch_time_t first_stun;
 	switch_time_t last_stun;
-	uint32_t wrong_addrs;
 	uint32_t samples_per_interval;
 	uint32_t samples_per_second;
 	uint32_t conf_samples_per_interval;
@@ -479,12 +478,11 @@ struct switch_rtp {
 	payload_map_t *pmap_tail;
 	kalman_estimator_t *estimators[KALMAN_SYSTEM_MODELS];
 	cusum_kalman_detector_t *detectors[KALMAN_SYSTEM_MODELS];
-	int ice_adj;
-	//switch_time_t last_adj;
-	//switch_time_t adj_window;
-	//uint32_t elapsed_stun;
-	//uint32_t elapsed_media;
-	//uint32_t elapsed_adj;
+	switch_time_t last_adj;
+	switch_time_t adj_window;
+	uint32_t elapsed_stun;
+	uint32_t elapsed_media;
+	uint32_t elapsed_adj;
 	uint8_t has_rtp;
 	uint8_t has_rtcp;
 	uint8_t has_ice;
@@ -863,41 +861,41 @@ static int rtp_common_write(switch_rtp_t *rtp_session,
 							rtp_msg_t *send_msg, void *data, uint32_t datalen, switch_payload_t payload, uint32_t timestamp, switch_frame_flag_t *flags);
 
 
-//#define MEDIA_TOO_LONG 2000
-//#define STUN_TOO_LONG 20000
-//#define ADJ_TOO_LONG 1000
-//
-//static void calc_elapsed(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice)
-//{
-//	switch_time_t ref_point;
-//	switch_time_t now;
-//
-//	now = switch_micro_time_now();
-//
-//	if (ice->last_ok && (!rtp_session->dtls || rtp_session->dtls->state == DS_READY)) {
-//		ref_point = ice->last_ok;
-//	} else {
-//		ref_point = rtp_session->first_stun;
-//	}
-//
-//	if (!ref_point) ref_point = now;
-//
-//	rtp_session->elapsed_stun = (unsigned int) ((now - ref_point) / 1000);
-//
-//	if (rtp_session->last_media) {
-//		rtp_session->elapsed_media = (unsigned int) ((now - rtp_session->last_media) / 1000);
-//	} else {
-//		rtp_session->elapsed_media = MEDIA_TOO_LONG + 1;
-//	}
-//
-//	if (rtp_session->last_adj) {
-//		rtp_session->elapsed_adj = (unsigned int) ((now - rtp_session->last_adj) / 1000);
-//	} else {
-//		rtp_session->elapsed_adj = ADJ_TOO_LONG + 1;
-//	}
-//}
+#define MEDIA_TOO_LONG 2000
+#define STUN_TOO_LONG 20000
+#define ADJ_TOO_LONG 1000
 
-static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice/*, switch_bool_t force*/)
+static void calc_elapsed(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice)
+{
+	switch_time_t ref_point;
+	switch_time_t now;
+
+	now = switch_micro_time_now();
+
+	if (ice->last_ok && (!rtp_session->dtls || rtp_session->dtls->state == DS_READY)) {
+		ref_point = ice->last_ok;
+	} else {
+		ref_point = rtp_session->first_stun;
+	}
+
+	if (!ref_point) ref_point = now;
+
+	rtp_session->elapsed_stun = (unsigned int) ((now - ref_point) / 1000);
+
+	if (rtp_session->last_media) {
+		rtp_session->elapsed_media = (unsigned int) ((now - rtp_session->last_media) / 1000);
+	} else {
+		rtp_session->elapsed_media = MEDIA_TOO_LONG + 1;
+	}
+
+	if (rtp_session->last_adj) {
+		rtp_session->elapsed_adj = (unsigned int) ((now - rtp_session->last_adj) / 1000);
+	} else {
+		rtp_session->elapsed_adj = ADJ_TOO_LONG + 1;
+	}
+}
+
+static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, switch_bool_t force)
 {
 	uint8_t buf[256] = { 0 };
 	switch_stun_packet_t *packet;
@@ -915,7 +913,7 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice/
 		return SWITCH_STATUS_BREAK;
 	}
 
-	if (ice->next_run && ice->next_run > now) {
+	if (!force && ice->next_run && ice->next_run >= now) {
 		return SWITCH_STATUS_BREAK;
 	}
 
@@ -1020,22 +1018,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 	int ok = 1;
 	uint32_t *pri = NULL;
 	int is_rtcp = ice == &rtp_session->rtcp_ice;
-	uint32_t elapsed;
-	switch_time_t ref_point;
-
-	switch_sockaddr_t *from_addr = rtp_session->from_addr;
-	const char *from_host = NULL;
-	switch_port_t from_port = 0;
-	char faddr_buf[80] = "";
-
-	if (is_rtcp) { 
-		from_addr = rtp_session->rtcp_from_addr; 
-	}
-
-	from_host = switch_get_addr(faddr_buf, sizeof(faddr_buf), from_addr);
-	from_port = switch_sockaddr_get_port(from_addr);
-
-	/*switch_channel_t *channel;
+	switch_channel_t *channel;
 	int i;
 	switch_sockaddr_t *from_addr = rtp_session->from_addr;
 	const char *from_host = NULL;
@@ -1047,7 +1030,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 	}
 
 	from_host = switch_get_addr(faddr_buf, sizeof(faddr_buf), from_addr);
-	from_port = switch_sockaddr_get_port(from_addr);*/
+	from_port = switch_sockaddr_get_port(from_addr);
 
 	//if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
 	//	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "WTF OK %s CALL\n", rtp_type(rtp_session));
@@ -1070,7 +1053,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 		cpylen = sizeof(buf);
 	}
 
-	//channel = switch_core_session_get_channel(rtp_session->session);
+	channel = switch_core_session_get_channel(rtp_session->session);
 
 	memcpy(buf, data, cpylen);
 	packet = switch_stun_packet_parse(buf, (uint32_t)cpylen);
@@ -1086,14 +1069,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 		rtp_session->first_stun = rtp_session->last_stun;
 	}
 
-	//calc_elapsed(rtp_session, ice);
-	if (ice->last_ok && (!rtp_session->dtls || rtp_session->dtls->state == DS_READY)) {
-		ref_point = ice->last_ok;
-	} else {
-		ref_point = rtp_session->first_stun;
-	}
-
-	elapsed = (unsigned int)((switch_micro_time_now() - ref_point) / 1000);
+	calc_elapsed(rtp_session, ice);
 
 	end_buf = buf + ((sizeof(buf) > packet->header.length) ? packet->header.length : sizeof(buf));
 
@@ -1108,12 +1084,12 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 		case SWITCH_STUN_ATTR_USE_CAND:
 			{
 				ice->rready = 1;
-				//for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
-				//	if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, from_host) && ice->ice_params->cands[i][ice->proto].con_port == from_port) {
-				//		ice->ice_params->cands[i][ice->proto].use_candidate = 1;
-				//		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Got USE-CANDIDATE on %s:%d\n", ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port);
-				//	}
-				//}
+				for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
+					if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, from_host) && ice->ice_params->cands[i][ice->proto].con_port == from_port) {
+						ice->ice_params->cands[i][ice->proto].use_candidate = 1;
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Got USE-CANDIDATE on %s:%d\n", ice->ice_params->cands[i][ice->proto].con_addr, ice->ice_params->cands[i][ice->proto].con_port);
+					}
+				}
 			}
 			break;
 		case SWITCH_STUN_ATTR_ERROR_CODE:
@@ -1201,20 +1177,6 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 		if (packet->header.type == SWITCH_STUN_BINDING_RESPONSE) {
 			ok = 1;
 
-			if (!ice->rready) {
-				if (rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]) {
-					rtp_session->ice.rready = 1;
-					rtp_session->rtcp_ice.rready = 1;
-				} else {
-					ice->rready = 1;
-				}
-
-				if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
-					switch_core_session_video_reinit(rtp_session->session);
-				}
-			}
-
-			/*
 			if (rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]) {
 				rtp_session->ice.rready = 1;
 				rtp_session->rtcp_ice.rready = 1;
@@ -1236,7 +1198,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 						}
 					}
 				}
-			}*/
+			}
 
 			// This line sends PLI/FIR requests to senders which in turn produce keyframes.
 			// We dont want this to happen every time we send a stun response. Philipp: Convince me otherwise :)
@@ -1267,7 +1229,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 			switch_port_t port = 0;
 			char *host = NULL;
 
-			if (elapsed > 20000 && pri) /*if (rtp_session->elapsed_stun > STUN_TOO_LONG && pri)*/ {
+			if (rtp_session->elapsed_stun > STUN_TOO_LONG && pri) {
 				int i, j;
 				uint32_t old;
 				//const char *tx_host;
@@ -1359,7 +1321,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "missed too many: %d, looking for new ICE dest.\n",
 						  ice->missed_count);
 		ice->rready = 0;
-		//ice->cand_responsive = 0;
+		ice->cand_responsive = 0;
 		ok = 1;
 	}
 
@@ -1369,11 +1331,8 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 	//}
 
 	if (ok) {
-		//const char *host2 = NULL;
-		//switch_port_t port2 = 0;
-		const char *host = NULL, *host2 = NULL;
-		switch_port_t port = 0, port2 = 0;
-		char buf[80] = "";
+		const char *host2 = NULL;
+		switch_port_t port2 = 0;
 		char buf2[80] = "";
 
 		if (packet->header.type == SWITCH_STUN_BINDING_REQUEST) {
@@ -1382,17 +1341,13 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 			const char *remote_ip;
 			switch_size_t bytes;
 			char ipbuf[50];
-			switch_sockaddr_t *from_addr = rtp_session->from_addr;
 			switch_socket_t *sock_output = rtp_session->sock_output;
 			uint8_t do_adj = 0;
 			switch_time_t now = switch_micro_time_now();
 			int cmp = 0;
-			//int cur_idx = -1, is_relay = 0, is_responsive = 0, use_candidate = 0;
-			int cur_idx = -1; //, is_relay = 0;
-			int i;
+			int cur_idx = -1, is_relay = 0, is_responsive = 0, use_candidate = 0;
 
 			if (is_rtcp) {
-				from_addr = rtp_session->rtcp_from_addr;
 				sock_output = rtp_session->rtcp_sock_output;
 			}
 
@@ -1418,81 +1373,10 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 
 			bytes = switch_stun_packet_length(rpacket);
 
-			host = switch_get_addr(buf, sizeof(buf), from_addr);
-			port = switch_sockaddr_get_port(from_addr);
 			host2 = switch_get_addr(buf2, sizeof(buf2), ice->addr);
 			port2 = switch_sockaddr_get_port(ice->addr);
 			cmp = switch_cmp_addr(from_addr, ice->addr, SWITCH_FALSE);
 
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG2,
-							  "STUN from %s:%d %s\n", host, port, cmp ? "EXPECTED" : "IGNORED");
-
-			if (ice->init && !cmp && switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE)) {
-				do_adj++;
-				rtp_session->ice_adj++;
-				rtp_session->wrong_addrs = 0;
-				ice->init = 0;
-			}
-
-			if (cmp) {
-				ice->last_ok = now;
-				rtp_session->wrong_addrs = 0;
-			} else {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG10,
-								  "ICE %d dt:%d i:%d i2:%d w:%d cmp:%d adj:%d\n", elapsed,
-								  (rtp_session->dtls && rtp_session->dtls->state != DS_READY), !ice->ready,
-								  !ice->rready, rtp_session->wrong_addrs,
-								  switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE), rtp_session->ice_adj);
-
-				if ((rtp_session->dtls && rtp_session->dtls->state != DS_READY) ||
-					((!ice->ready || !ice->rready) &&
-					 (rtp_session->wrong_addrs > 2 || switch_cmp_addr(from_addr, ice->addr, SWITCH_TRUE)) &&
-					 rtp_session->ice_adj < 10)) {
-					do_adj++;
-					rtp_session->ice_adj++;
-					rtp_session->wrong_addrs = 0;
-				} else if (rtp_session->wrong_addrs > 10 || elapsed >= 5000) {
-					do_adj++;
-				}
-
-				if (!do_adj) { rtp_session->wrong_addrs++; }
-
-				for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
-					if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, host)) {
-						cur_idx = i;
-						// if (!strcasecmp(ice->ice_params->cands[i][ice->proto].cand_type, "relay")) {
-						//	is_relay = 1;
-						// }
-					}
-				}
-
-				if (ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type &&
-					!strcasecmp(ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].cand_type,
-								"relay")) {
-
-					do_adj++;
-				}
-			}
-
-			if ((ice->type & ICE_VANILLA) && ice->ice_params && do_adj) {
-				ice->missed_count = 0;
-				ice->rready = 1;
-
-				if (cur_idx > -1) { ice->ice_params->chosen[ice->proto] = cur_idx; }
-
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE,
-								  "Auto Changing %s stun/%s/dtls port from %s:%u to %s:%u idx:%d\n",
-								  rtp_type(rtp_session), is_rtcp ? "rtcp" : "rtp", host2, port2, host, port, cur_idx);
-
-				switch_rtp_change_ice_dest(rtp_session, ice, host, port);
-				ice->last_ok = now;
-				rtp_session->wrong_addrs = 0;
-			}
-			// if (cmp) {
-			switch_socket_sendto(sock_output, from_addr, 0, (void *)rpacket, &bytes);
-			//}
-
-			/*
 			for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
 				if (!strcmp(ice->ice_params->cands[i][ice->proto].con_addr, from_host) && ice->ice_params->cands[i][ice->proto].con_port == from_port) {
 					if (!strcasecmp(ice->ice_params->cands[i][ice->proto].cand_type, "relay")) {
@@ -1639,7 +1523,7 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 				if (ice_out(rtp_session, ice, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
 					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_WARNING, "Error sending STUN Binding Request on ICE candidate still unresponsive to %s:%u\n", from_host, from_port);
 				}
-			}*/
+			}
 		}
 	} else if (packet->header.type == SWITCH_STUN_BINDING_ERROR_RESPONSE) {
 
@@ -2694,7 +2578,7 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 	}
 
 	if (rtp_session->ice.ice_user) {
-		if (ice_out(rtp_session, &rtp_session->ice/*, SWITCH_FALSE*/) == SWITCH_STATUS_GENERR) {
+		if (ice_out(rtp_session, &rtp_session->ice, SWITCH_FALSE) == SWITCH_STATUS_GENERR) {
 			ret = -1;
 			goto end;
 		}
@@ -2702,7 +2586,7 @@ static int check_rtcp_and_ice(switch_rtp_t *rtp_session)
 
 	if (!rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]) {
 		if (rtp_session->rtcp_ice.ice_user) {
-			if (ice_out(rtp_session, &rtp_session->rtcp_ice/*, SWITCH_FALSE*/) == SWITCH_STATUS_GENERR) {
+			if (ice_out(rtp_session, &rtp_session->rtcp_ice, SWITCH_FALSE) == SWITCH_STATUS_GENERR) {
 				ret = -1;
 				goto end;
 			}
@@ -3188,11 +3072,9 @@ SWITCH_DECLARE(void) switch_rtp_reset(switch_rtp_t *rtp_session)
 	memset(&rtp_session->ts_norm, 0, sizeof(rtp_session->ts_norm));
 
 	rtp_session->last_stun = rtp_session->first_stun = 0;
-	rtp_session->wrong_addrs = 0;
 	rtp_session->rtcp_sent_packets = 0;
 	rtp_session->rtcp_last_sent = 0;
-	rtp_session->ice_adj = 0;
-	//rtp_session->last_adj = 0;
+	rtp_session->last_adj = 0;
 
 	//switch_rtp_del_dtls(rtp_session, DTLS_TYPE_RTP|DTLS_TYPE_RTCP);
 	switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_PAUSE);
@@ -3202,7 +3084,7 @@ SWITCH_DECLARE(void) switch_rtp_reset(switch_rtp_t *rtp_session)
 	if (rtp_session->ice.ready) {
 		switch_rtp_reset_vb(rtp_session);
 		rtp_session->ice.ready = rtp_session->ice.rready = 0;
-		//rtp_session->ice.cand_responsive = 0;
+		rtp_session->ice.cand_responsive = 0;
 	}
 
 }
@@ -3548,31 +3430,30 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 	int r = 0, ret = 0, len;
 	switch_size_t bytes;
 	unsigned char buf[MAX_DTLS_MTU] = "";
-	int ready = rtp_session->ice.ice_user ? (rtp_session->ice.rready && rtp_session->ice.ready) : 1;
-	//uint8_t is_ice = rtp_session->ice.ice_user ? 1 : 0;
-	//int ready = is_ice ? (rtp_session->ice.rready && rtp_session->ice.ready) : 1;
+	uint8_t is_ice = rtp_session->ice.ice_user ? 1 : 0;
+	int ready = is_ice ? (rtp_session->ice.rready && rtp_session->ice.ready) : 1;
 	int pending;
 
 	if (!dtls->bytes && !ready) {
 		return 0;
 	}
 
-	//if (is_ice && !(rtp_session->ice.type & ICE_LITE) && !rtp_session->ice.cand_responsive) {
-	//	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Got DTLS packet but candidate is not responsive\n");
+	if (is_ice && !(rtp_session->ice.type & ICE_LITE) && !rtp_session->ice.cand_responsive) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Got DTLS packet but candidate is not responsive\n");
 
-	//	return 0;
-	//}
+		return 0;
+	}
 
-	//if (is_ice && !switch_cmp_addr(rtp_session->from_addr, rtp_session->ice.addr, SWITCH_TRUE)) {
-	//	char tmp_buf1[80] = "";
-	//	char tmp_buf2[80] = "";
-	//	const char *host_from = switch_get_addr(tmp_buf1, sizeof(tmp_buf1), rtp_session->from_addr);
-	//	const char *host_ice_cur_addr = switch_get_addr(tmp_buf2, sizeof(tmp_buf2), rtp_session->ice.addr);
+	if (is_ice && !switch_cmp_addr(rtp_session->from_addr, rtp_session->ice.addr, SWITCH_TRUE)) {
+		char tmp_buf1[80] = "";
+		char tmp_buf2[80] = "";
+		const char *host_from = switch_get_addr(tmp_buf1, sizeof(tmp_buf1), rtp_session->from_addr);
+		const char *host_ice_cur_addr = switch_get_addr(tmp_buf2, sizeof(tmp_buf2), rtp_session->ice.addr);
 
-	//	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Got DTLS packet from [%s] whilst current ICE negotiated address is [%s]. Ignored.\n", host_from, host_ice_cur_addr);
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Got DTLS packet from [%s] whilst current ICE negotiated address is [%s]. Ignored.\n", host_from, host_ice_cur_addr);
 
-	//	return 0;
-	//}
+		return 0;
+	}
 
 	if (dtls->bytes > 0 && dtls->data) {
 		ret = BIO_write(dtls->read_bio, dtls->data, (int)dtls->bytes);
@@ -5138,13 +5019,13 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 		switch_snprintf(user_ice, sizeof(user_ice), "%s:%s", rlogin, login);
 		switch_snprintf(luser_ice, sizeof(luser_ice), "%s%s", rlogin, login);
 		ice->ready = ice->rready = 0;
-		//ice->cand_responsive = 0;
+		ice->cand_responsive = 0;
 	} else {
 		switch_snprintf(ice_user, sizeof(ice_user), "%s%s", login, rlogin);
 		switch_snprintf(user_ice, sizeof(user_ice), "%s%s", rlogin, login);
 		switch_snprintf(luser_ice, sizeof(luser_ice), "");
 		ice->ready = ice->rready = 1;
-		//ice->cand_responsive = 0;
+		ice->cand_responsive = 0;
 	}
 
 	ice->ice_user = switch_core_strdup(rtp_session->pool, ice_user);
@@ -5155,7 +5036,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 	ice->pass = "";
 	ice->rpass = "";
 	ice->next_run = switch_micro_time_now();
-	ice->init = 1;
+	ice->initializing = 1;
 
 	if (password) {
 		ice->pass = switch_core_strdup(rtp_session->pool, password);
@@ -6101,7 +5982,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 		/* version 2 probably rtp */
 		rtp_session->has_rtp = (rtp_session->recv_msg.header.version == 2);
 
-		if (rtp_session->media_timeout /*|| rtp_session->ice.ice_user*/) {
+		if (rtp_session->media_timeout || rtp_session->ice.ice_user) {
 			rtp_session->last_media = switch_micro_time_now();
 		}
 
