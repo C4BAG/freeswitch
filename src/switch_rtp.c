@@ -9397,6 +9397,115 @@ SWITCH_DECLARE(switch_core_session_t*) switch_rtp_get_core_session(switch_rtp_t 
 	return rtp_session->session;
 }
 
+typedef struct candidate_sort_s {
+	uint32_t prio_or_index;
+	int index;
+} candidate_sort_t;
+
+static int sort_candidates_compare(const void *p, const void *q)
+{
+	const candidate_sort_t *pp = (const candidate_sort_t *)p;
+	const candidate_sort_t *qq = (const candidate_sort_t *)q;
+
+	if (qq->prio_or_index != pp->prio_or_index) {
+		return (qq->prio_or_index > pp->prio_or_index) - (qq->prio_or_index < pp->prio_or_index);   /* priority descending, no subtraction overflow */
+	}
+	return (pp->index > qq->index) - (pp->index < qq->index);   /* equal priority: keep original order (stable) */
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_ice_sort_candidates(ice_t *ice_params, ice_proto_t proto)
+{
+	int i;
+	uint32_t prio = UINT32_MAX;
+	int sorted = 1;
+
+	if (ice_params == NULL) {
+		return SWITCH_STATUS_NOOP;
+	}
+	
+	// fast check
+	for (i = 0; i < ice_params->cand_idx[proto]; i++) {
+		if (ice_params->cands[i][proto].priority > prio) {
+			sorted = 0;
+			break;
+		}
+		prio = ice_params->cands[i][proto].priority;
+	}
+
+	if (sorted) { 
+		return SWITCH_STATUS_FALSE;
+	} else {
+		candidate_sort_t sort[MAX_CAND];
+		int index, j;
+		icand_t cand;
+
+		sorted = 0;
+
+		for (i = 0; i < ice_params->cand_idx[proto]; i++) {
+			sort[i].prio_or_index = ice_params->cands[i][proto].priority;
+			sort[i].index = i;
+		}
+
+		qsort(&sort[0], ice_params->cand_idx[proto], sizeof(candidate_sort_t), sort_candidates_compare);
+
+		// initialize index mapping for ordering 
+		for (i = 0; i < ice_params->cand_idx[proto]; i++) { 
+			sort[i].prio_or_index = i; 
+		}
+
+		// ordering of data
+		for (i = 0; i < ice_params->cand_idx[proto]; i++) {
+			// convert requested index to current index
+			index = (int)sort[sort[i].index].prio_or_index;
+			if (i != index) {
+				// exchange cand i <-> index
+				cand = ice_params->cands[i][proto];
+				ice_params->cands[i][proto] = ice_params->cands[index][proto];
+				ice_params->cands[index][proto] = cand;
+
+				sorted++;
+				// update current index for both candidates
+				for (j = 0; j < ice_params->cand_idx[proto]; j++) {
+					if ((int)sort[j].prio_or_index == i) {
+						sort[j].prio_or_index = index;
+						sorted--;
+						break;
+					}
+				}
+				sort[sort[i].index].prio_or_index = i;
+			}
+		}
+
+		/* Convert chosen to its position in the sorted list. sort[i].index is the OLD
+		   index of the candidate now at position i, so the new position of the old
+		   chosen candidate is the i where sort[i].index == old chosen (the inverse of
+		   the permutation; reading sort[chosen].index applies the permutation the wrong
+		   way and only happens to work for self-inverse permutations). Remap only when a
+		   candidate was actually chosen, so an unset chosen[proto] stays 0 instead of
+		   becoming a random index. */
+		if (ice_params->is_chosen[proto]) {
+			int old_chosen = ice_params->chosen[proto];
+			for (i = 0; i < ice_params->cand_idx[proto]; i++) {
+				if (sort[i].index == old_chosen) {
+					ice_params->chosen[proto] = i;
+					break;
+				}
+			}
+		}
+
+		// validation of ordering, sorted should be 0
+		if (sorted) {
+			/* Unreachable with correct permutation logic; if it ever triggers, the list
+			   is partially permuted - drop any selection for this component so the caller
+			   falls back to safe defaults instead of trusting a stale chosen index. */
+			ice_params->chosen[proto] = 0;
+			ice_params->is_chosen[proto] = 0;
+			return SWITCH_STATUS_GENERR;
+		}
+	}
+	return SWITCH_STATUS_SUCCESS;
+}
+
 /* For Emacs:
  * Local Variables:
  * mode:c

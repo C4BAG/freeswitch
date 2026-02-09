@@ -4062,6 +4062,19 @@ static switch_bool_t ip_possible(switch_media_handle_t *smh, const char *ip)
 	return r;
 }
 
+#define proto2str(proto) (proto ? "rtcp" : "rtp")
+
+static void ice_sort_candidates(switch_media_handle_t *smh, switch_media_type_t type, ice_t *ice_params, ice_proto_t proto)
+{
+	switch_status_t res;
+	res = switch_rtp_ice_sort_candidates(ice_params, proto);
+	if (res == SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, "Sorted %d candidates for %s/%s.\n", ice_params->cand_idx[proto], type2str(type), proto2str(proto));
+	} else if (res != SWITCH_STATUS_FALSE) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_ERROR, "Sorting %d candidates for %s/%s failed: %d\n", ice_params->cand_idx[proto], type2str(type), proto2str(proto), res);
+	}
+}
+
 //?
 static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t type, sdp_session_t *sdp, sdp_media_t *m)
 {
@@ -4282,6 +4295,11 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		}
 	}
 
+	if (cand_seen) { 
+		ice_sort_candidates(smh, type, &engine->ice_in, IPR_RTP);
+		ice_sort_candidates(smh, type, &engine->ice_in, IPR_RTCP);
+	}
+
 	if (!ice_seen) {
 		return SWITCH_STATUS_SUCCESS;
 	}
@@ -4294,6 +4312,8 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, "Searching for %s candidate.\n", cid ? "rtcp" : "rtp");
 
 		for (ai = 0; ai < engine->cand_acl_count; ai++) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG8, "Searching for %s candidate within ACL %s (%d of %d)\n", cid ? "rtcp" : "rtp", engine->cand_acl[ai], ai + 1, engine->cand_acl_count);
+
 			for (i = 0; i < engine->ice_in.cand_idx[cid]; i++) {
 				int is_relay = engine->ice_in.cands[i][cid].cand_type && !strcmp(engine->ice_in.cands[i][cid].cand_type, "relay");
 
@@ -4311,6 +4331,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 
 					if (cid == 0 && got_rtcp_mux && engine->ice_in.cand_idx[1] < MAX_CAND) {
 
+						// check whether the same candidate may already in the list of rtcp candidates?
 						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG,
 										  "Choose same candidate, index %d, for rtcp based on rtcp-mux attribute %s:%d\n", engine->ice_in.cand_idx[1],
 										  engine->ice_in.cands[i][cid].con_addr, engine->ice_in.cands[i][cid].con_port);
@@ -4320,6 +4341,8 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 						engine->ice_in.chosen[1] = engine->ice_in.cand_idx[1];
 						engine->ice_in.is_chosen[1] = 1;
 						engine->ice_in.cand_idx[1]++;
+
+						ice_sort_candidates(smh, type, &engine->ice_in, IPR_RTCP);
 
 						goto done_choosing;
 					}
