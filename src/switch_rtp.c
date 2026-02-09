@@ -3512,23 +3512,29 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 		return 0;
 	}
 
-	if (is_ice && !(rtp_session->ice.type & ICE_LITE) && !rtp_session->ice.cand_responsive) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Got DTLS packet but candidate is not responsive\n");
+	// Claude analysis of the following ICE checks:
+	// The IP address and candidate check is overly conservative defensive code without strong security justification. It may prevent legitimate scenarios such as NAT rebinding, mobile network handover,
+	// TURN relay usage, and dual-stack (IPv4/IPv6) transitions.
+	// A more robust implementation would rely solely on DTLS fingerprint verification and implement rate-limiting for DoS protection instead of IP-based filtering.
+	if (is_ice && !(rtp_session->ice.type & ICE_DISABLE_DTLS_PROTECTION)) {
+		if (!(rtp_session->ice.type & ICE_LITE) && !rtp_session->ice.cand_responsive) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Got DTLS packet but candidate is not responsive\n");
 
-		return 0;
+			return 0;
+		}
+
+		if (!switch_cmp_addr(rtp_session->from_addr, rtp_session->ice.addr, SWITCH_TRUE)) {
+			char tmp_buf1[80] = "";
+			char tmp_buf2[80] = "";
+			const char *host_from = switch_get_addr(tmp_buf1, sizeof(tmp_buf1), rtp_session->from_addr);
+			const char *host_ice_cur_addr = switch_get_addr(tmp_buf2, sizeof(tmp_buf2), rtp_session->ice.addr);
+
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Got DTLS packet from [%s] whilst current ICE negotiated address is [%s]. Ignored.\n", host_from, host_ice_cur_addr);
+
+			return 0;
+		}
 	}
-
-	if (is_ice && !switch_cmp_addr(rtp_session->from_addr, rtp_session->ice.addr, SWITCH_TRUE)) {
-		char tmp_buf1[80] = "";
-		char tmp_buf2[80] = "";
-		const char *host_from = switch_get_addr(tmp_buf1, sizeof(tmp_buf1), rtp_session->from_addr);
-		const char *host_ice_cur_addr = switch_get_addr(tmp_buf2, sizeof(tmp_buf2), rtp_session->ice.addr);
-
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Got DTLS packet from [%s] whilst current ICE negotiated address is [%s]. Ignored.\n", host_from, host_ice_cur_addr);
-
-		return 0;
-	}
-
+	
 	if (dtls->bytes > 0 && dtls->data) {
 		ret = BIO_write(dtls->read_bio, dtls->data, (int)dtls->bytes);
 		if (ret <= 0) {

@@ -4008,6 +4008,11 @@ static switch_core_media_ice_type_t switch_determine_ice_type(switch_rtp_engine_
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG8, "Ice-Type from direction '%s': ice_type: %d\n", direction == SWITCH_CALL_DIRECTION_INBOUND? "inbound" : "outbound", ice_type);
 	}
 
+	if (switch_channel_var_true(session->channel, "ice_disable_dtls_protection")) {
+		ice_type |= ICE_DISABLE_DTLS_PROTECTION;
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG8, "Ice-Type from channel-variable 'ice_disable_dtls_protection': ice_type: %d\n", ice_type);
+	}
+
 	return ice_type;
 }
 
