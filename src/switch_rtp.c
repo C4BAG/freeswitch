@@ -9239,6 +9239,90 @@ SWITCH_DECLARE(switch_core_session_t*) switch_rtp_get_core_session(switch_rtp_t 
 	return rtp_session->session;
 }
 
+typedef struct candidate_sort_s {
+	uint32_t prio_or_index;
+	int index;
+} candidate_sort_t;
+
+static int sort_candidates_compare(const void *p, const void *q)
+{
+	return ((candidate_sort_t *)q)->prio_or_index - ((candidate_sort_t *)p)->prio_or_index;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_ice_sort_candidates(ice_t *ice_params, ice_proto_t proto)
+{
+	int i;
+	uint32_t prio = UINT32_MAX;
+	int sorted = 1;
+
+	if (ice_params == NULL) {
+		return SWITCH_STATUS_NOOP;
+	}
+	
+	// fast check
+	for (i = 0; i < ice_params->cand_idx[proto]; i++) {
+		if (ice_params->cands[i][proto].priority > prio) {
+			sorted = 0;
+			break;
+		}
+		prio = ice_params->cands[i][proto].priority;
+	}
+
+	if (sorted) { 
+		return SWITCH_STATUS_FALSE;
+	} else {
+		candidate_sort_t sort[MAX_CAND];
+		int index, j;
+		icand_t cand;
+
+		sorted = 0;
+
+		for (i = 0; i < ice_params->cand_idx[proto]; i++) {
+			sort[i].prio_or_index = ice_params->cands[i][proto].priority;
+			sort[i].index = i;
+		}
+
+		qsort(&sort[0], ice_params->cand_idx[proto], sizeof(candidate_sort_t), sort_candidates_compare);
+
+		// initialize index mapping for ordering 
+		for (i = 0; i < ice_params->cand_idx[proto]; i++) { 
+			sort[i].prio_or_index = i; 
+		}
+
+		// ordering of data
+		for (i = 0; i < ice_params->cand_idx[proto]; i++) {
+			// convert requested index to current index
+			index = (int)sort[sort[i].index].prio_or_index;
+			if (i != index) {
+				// exchange cand i <-> index
+				cand = ice_params->cands[i][proto];
+				ice_params->cands[i][proto] = ice_params->cands[index][proto];
+				ice_params->cands[index][proto] = cand;
+
+				sorted++;
+				// update current index for both candidates
+				for (j = 0; j < ice_params->cand_idx[proto]; j++) {
+					if ((int)sort[j].prio_or_index == i) {
+						sort[j].prio_or_index = index;
+						sorted--;
+						break;
+					}
+				}
+				sort[sort[i].index].prio_or_index = i;
+			}
+		}
+
+		// convert chosen
+		ice_params->chosen[proto] = sort[ice_params->chosen[proto]].index;
+
+		// validation of ordering, sorted should be 0
+		if (sorted) { 
+			return SWITCH_STATUS_GENERR; 
+		}
+	}
+	return SWITCH_STATUS_SUCCESS;
+}
+
 /* For Emacs:
  * Local Variables:
  * mode:c

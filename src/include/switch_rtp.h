@@ -177,6 +177,7 @@ typedef enum { /* FMT Values for PSFB Payload Types http://www.iana.org/assignme
 } rtcp_psfb_t;
 
 
+SWITCH_DECLARE(switch_status_t) switch_rtp_ice_sort_candidates(ice_t *ice_params, ice_proto_t proto);
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_add_crypto_key(switch_rtp_t *rtp_session, switch_rtp_crypto_direction_t direction, uint32_t index, switch_secure_settings_t *ssec);
 
