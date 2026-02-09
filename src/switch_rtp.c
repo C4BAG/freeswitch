@@ -3522,6 +3522,36 @@ static void free_dtls(switch_dtls_t **dtlsp)
 	}
 }
 
+/* Optimized DTLS-over-ICE peer binding: non-zero if the current packet source
+   (rtp_session->from_addr) matches any ICE candidate that has proven responsive
+   (answered a connectivity check with the negotiated ICE credentials). DTLS stays
+   on the connection it started on while ICE keeps re-optimizing the selected pair,
+   so binding to the single current ice->addr would drop in-flight DTLS on every
+   ICE switch; accepting any responsive candidate keeps the handshake alive without
+   accepting off-path (non-validated) sources. Callers hold rtp_session->ice_mutex. */
+static int dtls_from_responsive_ice_cand(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice)
+{
+	char host[80] = "";
+	switch_port_t port;
+	int i;
+
+	if (!ice->ice_params) {
+		return 0;
+	}
+
+	switch_get_addr(host, sizeof(host), rtp_session->from_addr);
+	port = switch_sockaddr_get_port(rtp_session->from_addr);
+
+	for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
+		icand_t *cand = &ice->ice_params->cands[i][ice->proto];
+		if (cand->responsive && cand->con_addr && !strcmp(host, cand->con_addr) && port == cand->con_port) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
 static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 {
 	int r = 0, ret = 0, len;
@@ -3535,23 +3565,37 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 		return 0;
 	}
 
-	if (is_ice && !(rtp_session->ice.type & ICE_LITE) && !rtp_session->ice.cand_responsive) {
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG6, "Got DTLS packet but candidate is not responsive\n");
+	/* When ICE is active, an incoming DTLS record is accepted only from a peer that
+	   ICE has already validated (a candidate that answered a connectivity check with
+	   the negotiated ICE credentials), which rejects off-path injection.
 
-		return 0;
+	   The binding is to ANY responsive candidate, not to the single currently
+	   selected ice.addr. DTLS stays on the connection it started on while ICE keeps
+	   re-optimizing the selected pair underneath it; binding to the one current
+	   address would drop in-flight DTLS on every ICE switch and stall the handshake
+	   until DTLS retransmit backoff (1s, 2s, 4s ...) recovers. The original single
+	   address gate (upstream SignalWire commit 104c0b3fec, "Fix flopping routes on
+	   ICE negotiation") caused exactly that and led to massive connection-setup
+	   problems in our customer deployments.
+
+	   The channel variable "ice_disable_dtls_protection" suspends the binding
+	   entirely - reserved for special cases, test and diagnosis. With it set the
+	   DTLS server role accepts records from any source and, since there is no
+	   fingerprint fallback in the server role, an off-path sender can abort the
+	   handshake (DoS); no media hijack is possible because all DTLS replies go to
+	   dtls->remote_addr (the SDP/ICE address), never to the packet source. Leave it
+	   unset in production. RFC 8445 section 12. */
+	if (is_ice && !(rtp_session->ice.type & ICE_DISABLE_DTLS_PROTECTION)) {
+		if (!(rtp_session->ice.type & ICE_LITE) && !dtls_from_responsive_ice_cand(rtp_session, &rtp_session->ice)) {
+			char tmp_buf1[80] = "";
+			const char *host_from = switch_get_addr(tmp_buf1, sizeof(tmp_buf1), rtp_session->from_addr);
+
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Got DTLS packet from [%s] which is not a responsive ICE candidate. Ignored.\n", host_from);
+
+			return 0;
+		}
 	}
-
-	if (is_ice && !switch_cmp_addr(rtp_session->from_addr, rtp_session->ice.addr, SWITCH_TRUE)) {
-		char tmp_buf1[80] = "";
-		char tmp_buf2[80] = "";
-		const char *host_from = switch_get_addr(tmp_buf1, sizeof(tmp_buf1), rtp_session->from_addr);
-		const char *host_ice_cur_addr = switch_get_addr(tmp_buf2, sizeof(tmp_buf2), rtp_session->ice.addr);
-
-		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Got DTLS packet from [%s] whilst current ICE negotiated address is [%s]. Ignored.\n", host_from, host_ice_cur_addr);
-
-		return 0;
-	}
-
+	
 	if (dtls->bytes > 0 && dtls->data) {
 		ret = BIO_write(dtls->read_bio, dtls->data, (int)dtls->bytes);
 		if (ret <= 0) {
