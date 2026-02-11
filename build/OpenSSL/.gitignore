@@ -1,0 +1,5 @@
+# Alles ignorieren (Build-Artefakte, Source, Output)
+*
+# Ausnahmen: Script und .gitignore
+!.gitignore
+!build-openssl.bat
