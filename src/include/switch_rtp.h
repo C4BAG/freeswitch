@@ -333,6 +333,12 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_sync_stats(switch_rtp_t *rtp_session)
 SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_session, char *login, char *rlogin,
 														const char *password, const char *rpassword, ice_proto_t proto,
 														switch_core_media_ice_type_t type, ice_t *ice_params);
+/*!
+  \brief Same as switch_rtp_activate_ice() but additionally provide outgoing ICE candidates in ice_params_out
+*/
+SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice_v2(switch_rtp_t *rtp_session, char *login, char *rlogin,
+														const char *password, const char *rpassword, ice_proto_t proto,
+														switch_core_media_ice_type_t type, ice_t *ice_params, ice_t *ice_params_out);
 
 /*!
   \brief Activate sending RTCP Sender Reports (SR's)

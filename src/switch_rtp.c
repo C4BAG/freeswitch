@@ -254,6 +254,7 @@ typedef struct {
 	switch_time_t next_run;
 	switch_core_media_ice_type_t type;
 	ice_t *ice_params;
+	ice_t *ice_params_out;
 	ice_proto_t proto;
 	uint8_t sending;
 	uint8_t ready;
@@ -5154,6 +5155,13 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 														const char *password, const char *rpassword, ice_proto_t proto,
 														switch_core_media_ice_type_t type, ice_t *ice_params)
 {
+	return switch_rtp_activate_ice_v2(rtp_session, login, rlogin, password, rpassword, proto, type, ice_params, NULL);
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice_v2(switch_rtp_t *rtp_session, char *login, char *rlogin,
+														const char *password, const char *rpassword, ice_proto_t proto,
+														switch_core_media_ice_type_t type, ice_t *ice_params, ice_t *ice_params_out)
+{
 	char ice_user[STUN_USERNAME_MAX_SIZE];
 	char user_ice[STUN_USERNAME_MAX_SIZE];
 	char luser_ice[SDP_UFRAG_MAX_SIZE];
@@ -5194,6 +5202,7 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 	ice->luser_ice = switch_core_strdup(rtp_session->pool, luser_ice);
 	ice->type = type;
 	ice->ice_params = ice_params;
+	ice->ice_params_out = ice_params_out;
 	ice->pass = "";
 	ice->rpass = "";
 	ice->next_run = switch_micro_time_now();
@@ -5242,10 +5251,11 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice(switch_rtp_t *rtp_sessio
 		port = switch_sockaddr_get_port(ice->addr);
 	}
 
-	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "Activating %s %s ICE: %s %s:%d\n",
-					  proto == IPR_RTP ? "RTP" : "RTCP", rtp_type(rtp_session), ice_user, host, port);
-
-
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE, "Activating %s %s ICE: %s %s:%d, candidates-in/out: %d/%d, ice_type: %d\n",
+					  proto == IPR_RTP ? "RTP" : "RTCP", rtp_type(rtp_session), ice_user, host, port, 
+					  ice_params ? ice_params->cand_idx[proto] : -1, 
+					  ice_params_out ? ice_params_out->cand_idx[proto] : -1, type);
+	
 	rtp_session->rtp_bugs |= RTP_BUG_ACCEPT_ANY_PACKETS;
 
 
