@@ -762,6 +762,21 @@ static uint8_t check_channel_status(originate_global_t *oglobals, uint32_t len, 
 		}
 
 		state = switch_channel_get_state(oglobals->originate_status[i].peer_channel);
+
+		/* C4B DEBUG: log peer channel state on every check */
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+			"C4B_DBG check_channel_status: peer[%d/%d] uuid=%s name=%s state=%s(%d) CF_ORIGINATING=%d CF_TRANSFER=%d CF_REDIRECT=%d CF_BRIDGED=%d hups=%d\n",
+			i, len,
+			switch_channel_get_uuid(oglobals->originate_status[i].peer_channel),
+			switch_channel_get_name(oglobals->originate_status[i].peer_channel),
+			switch_channel_state_name(state), (int)state,
+			switch_channel_test_flag(oglobals->originate_status[i].peer_channel, CF_ORIGINATING) ? 1 : 0,
+			switch_channel_test_flag(oglobals->originate_status[i].peer_channel, CF_TRANSFER) ? 1 : 0,
+			switch_channel_test_flag(oglobals->originate_status[i].peer_channel, CF_REDIRECT) ? 1 : 0,
+			switch_channel_test_flag(oglobals->originate_status[i].peer_channel, CF_BRIDGED) ? 1 : 0,
+			oglobals->hups);
+		/* END C4B DEBUG */
+
 		if (state >= CS_HANGUP || state == CS_RESET || switch_channel_test_flag(oglobals->originate_status[i].peer_channel, CF_TRANSFER) ||
 			switch_channel_test_flag(oglobals->originate_status[i].peer_channel, CF_REDIRECT) ||
 			switch_channel_test_flag(oglobals->originate_status[i].peer_channel, CF_BRIDGED) ||
@@ -865,6 +880,12 @@ static uint8_t check_channel_status(originate_global_t *oglobals, uint32_t len, 
 	} else {
 		rval = 1;
 	}
+
+	/* C4B DEBUG: log check_channel_status result */
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+		"C4B_DBG check_channel_status: result=%d hups=%d pickups_no_tl=%d len=%d\n",
+		rval, oglobals->hups, pickups_without_timelimit, len);
+	/* END C4B DEBUG */
 
   end:
 
@@ -3341,10 +3362,23 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 				soft_holding = switch_channel_get_variable(caller_channel, SWITCH_SOFT_HOLDING_UUID_VARIABLE);
 			}
 
+			{ /* C4B DEBUG scope */
+			time_t last_debug_elapsed = -1;
+
 			while ((!caller_channel || switch_channel_ready(caller_channel) || switch_channel_test_flag(caller_channel, CF_XFER_ZOMBIE)) &&
 					check_channel_status(&oglobals, and_argc, &force_reason, start)) {
 				time_t elapsed = switch_epoch_time_now(NULL) - start;
 				read_packet = 0;
+
+				/* C4B DEBUG: log once per second */
+				if (elapsed != last_debug_elapsed) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(oglobals.session), SWITCH_LOG_WARNING,
+						"C4B_DBG originate_loop: elapsed=%ld timelimit=%u hups=%d idx=%d and_argc=%d caller_ready=%d\n",
+						(long)elapsed, timelimit_sec, oglobals.hups, oglobals.idx, and_argc,
+						caller_channel ? switch_channel_ready(caller_channel) : -1);
+					last_debug_elapsed = elapsed;
+				}
+				/* END C4B DEBUG */
 
 				if (cancel_cause && *cancel_cause > 0) {
 					if (force_reason == SWITCH_CAUSE_NONE) {
@@ -3589,6 +3623,8 @@ SWITCH_DECLARE(switch_status_t) switch_ivr_originate(switch_core_session_t *sess
 					switch_yield(20000);
 				}
 			}
+
+			} /* END C4B DEBUG scope */
 
 		  notready:
 
