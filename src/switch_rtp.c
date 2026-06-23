@@ -7634,6 +7634,82 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 
 			}
 			poll_loop = 0;
+
+			/* C4B patch: Return CNG frame during DTLS handshake to unblock callers.
+			 *
+			 * Problem:
+			 * --------
+			 * When a WebRTC session (A leg) is in the originate/bridge loop
+			 * (switch_ivr_originate.c:~3368), the loop calls
+			 * switch_core_session_read_frame() on the A leg before checking
+			 * B leg channel status via check_channel_status(). This enters
+			 * rtp_common_read() here. During the DTLS handshake, ICE/STUN
+			 * binding requests arrive on the RTP socket. read_rtp_packet()
+			 * processes them (advancing the DTLS state machine via do_dtls())
+			 * but sets bytes=0 because they are not RTP data.
+			 *
+			 * Without this patch, rtp_common_read() never returns a frame:
+			 *
+			 *   1. poll succeeds (ICE/STUN packet) -> got_rtp_poll=1
+			 *   2. read_rtp_packet() handles ICE/DTLS -> bytes=0
+			 *   3. Existing CNG return (~line 7780) checks !got_rtp_poll
+			 *      -> false (poll succeeded) -> skipped
+			 *   4. RTCP_MUX path requires has_rtcp=1 -> skipped for ICE
+			 *   5. Loop continues -> never returns -> read_frame blocks
+			 *
+			 * Because read_frame never returns, the originate loop never
+			 * reaches check_channel_status(). If the B leg terminates for
+			 * any reason (callee rejects, busy, timeout, caller cancels),
+			 * the A leg caller stays stuck in "dialing" until the originate
+			 * timeout fires (30-60s).
+			 *
+			 * Affected scenario:
+			 * ------------------
+			 * WebRTC softphone (A leg) calls out via bridge/originate.
+			 * The B leg can be a SIP provider (sending 180 Ringing with SDP,
+			 * triggering early media and DTLS setup) or another softphone
+			 * (via B2Bua). Any B leg termination during the A leg's DTLS
+			 * handshake window triggers this bug.
+			 *
+			 * Typical reproduction: WebRTC client unreachable on its RTP
+			 * address (e.g. wrong network adapter), so DTLS never completes.
+			 * Callee declines -> caller stays stuck.
+			 *
+			 * Fix:
+			 * ----
+			 * Return a CNG (comfort noise) frame when:
+			 *   - DTLS is active but not yet ready (state != DS_READY)
+			 *   - No actual RTP bytes were received (!bytes)
+			 *   - Blocking I/O mode (same guard as other CNG returns)
+			 *   - No DTMF output in progress (same guard as other CNG returns)
+			 *
+			 * This unblocks read_frame, allowing the originate loop to call
+			 * check_channel_status() and detect B leg termination promptly.
+			 *
+			 * Safety:
+			 * -------
+			 * - CNG frames are returned in multiple other code paths in this
+			 *   function. All callers (originate, bridge, conference) handle
+			 *   them. The caller hears ringback, not the CNG frame.
+			 * - DTLS still progresses: do_dtls() runs inside read_rtp_packet()
+			 *   on every iteration BEFORE this point. The CNG return fires
+			 *   after the packet is fully processed.
+			 * - No impact on established calls: once DTLS completes
+			 *   (state == DS_READY), this condition stops matching.
+			 * - No impact on non-WebRTC calls: requires rtp_session->dtls
+			 *   to be set.
+			 * - media_timeout/rtp_timeout_sec do NOT help because ICE/STUN
+			 *   packets keep resetting the media timer.
+			 */
+			if (!bytes && rtp_session->dtls && rtp_session->dtls->state != DS_READY &&
+				(!(io_flags & SWITCH_IO_FLAG_NOBLOCK)) &&
+				(rtp_session->dtmf_data.out_digit_dur == 0)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+					"C4B patch: returning CNG frame during DTLS handshake (dtls_state=%d, got_rtp_poll=%d)\n",
+					rtp_session->dtls->state, got_rtp_poll);
+				return_cng_frame();
+			}
+
 		} else {
 
 			if (!switch_rtp_ready(rtp_session)) {
