@@ -5915,6 +5915,14 @@ static int jb_valid(switch_rtp_t *rtp_session)
 		}
 	}
 
+	/* C4B note: reads rtp_session->dtls->state WITHOUT ice_mutex. The dtls
+	   struct can be freed concurrently by switch_rtp_del_dtls() (which holds
+	   ice_mutex), so this is a latent use-after-free race. Deliberately left
+	   unlocked here: matches upstream (commit 1585ca7aaf locked only
+	   read_rtp_packet) and avoids a per-packet mutex in this hot path. A proper
+	   fix belongs upstream (refcount dtls, or keep it alive for the session
+	   lifetime). The one access C4B introduced was locked (originate CNG patch
+	   in rtp_common_read). */
 	if (rtp_session->dtls && rtp_session->dtls->state != DS_READY) {
 		return 0;
 	}
@@ -8489,6 +8497,14 @@ static int rtp_write_ready(switch_rtp_t *rtp_session, uint32_t bytes, int line)
 		return 0;
 	}
 
+	/* C4B note: reads rtp_session->dtls->state WITHOUT ice_mutex. The dtls
+	   struct can be freed concurrently by switch_rtp_del_dtls() (which holds
+	   ice_mutex), so this is a latent use-after-free race. Deliberately left
+	   unlocked here: matches upstream (commit 1585ca7aaf locked only
+	   read_rtp_packet) and avoids a per-packet mutex in this hot path. A proper
+	   fix belongs upstream (refcount dtls, or keep it alive for the session
+	   lifetime). The one access C4B introduced was locked (originate CNG patch
+	   in rtp_common_read). */
 	if (rtp_session->dtls && rtp_session->dtls->state != DS_READY) {
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG3, "Skip sending %s packet %ld bytes (dtls not ready @ line %d!)\n",
 						  rtp_type(rtp_session), (long)bytes, line);
