@@ -9369,6 +9369,113 @@ SWITCH_DECLARE(switch_rtp_stats_t *) switch_rtp_get_stats(switch_rtp_t *rtp_sess
 	return s;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_rtp_has_ice(switch_rtp_t *rtp_session, ice_proto_t proto)
+{
+	switch_rtp_ice_t *ice;
+
+	if (!rtp_session) {
+		return SWITCH_FALSE;
+	}
+
+	ice = (proto == IPR_RTCP) ? &rtp_session->rtcp_ice : &rtp_session->ice;
+
+	return (ice->ice_user != NULL) ? SWITCH_TRUE : SWITCH_FALSE;
+}
+
+/* Copy one protocol's candidate list into the snapshot. icand_t is a fixed-size
+   struct, so the assignment freezes the scalar fields and the (pool-stable)
+   string pointers under the lock - no per-string duplication needed. */
+static void ice_snapshot_copy_cands(ice_t *src, int idx, icand_t *dst, int *count, int *chosen, int *is_chosen,
+									 const char **ufrag, const char **pwd)
+{
+	int i, n = 0;
+
+	if (!src) {
+		*count = 0;
+		*chosen = -1;
+		*is_chosen = 0;
+		*ufrag = NULL;
+		*pwd = NULL;
+		return;
+	}
+
+	n = src->cand_idx[idx];
+	if (n > MAX_CAND) {
+		n = MAX_CAND;
+	}
+	if (n < 0) {
+		n = 0;
+	}
+
+	for (i = 0; i < n; i++) {
+		dst[i] = src->cands[i][idx];
+	}
+
+	*count = n;
+	*chosen = src->chosen[idx];
+	*is_chosen = src->is_chosen[idx];
+	*ufrag = src->ufrag;
+	*pwd = src->pwd;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_get_ice_snapshot(switch_rtp_t *rtp_session, ice_proto_t proto, switch_rtp_ice_snapshot_t *snapshot)
+{
+	switch_rtp_ice_t *ice;
+	int idx = (proto == IPR_RTCP) ? 1 : 0;
+
+	if (!rtp_session || !snapshot) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	ice = (proto == IPR_RTCP) ? &rtp_session->rtcp_ice : &rtp_session->ice;
+
+	if (!ice->ice_user) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	switch_mutex_lock(rtp_session->ice_mutex);
+
+	memset(snapshot, 0, sizeof(*snapshot));
+
+	snapshot->enabled = 1;
+	snapshot->sending = ice->sending;
+	snapshot->ready = ice->ready;
+	snapshot->rready = ice->rready;
+	snapshot->initializing = ice->initializing;
+	snapshot->cand_responsive = ice->cand_responsive;
+	snapshot->controlled = (ice->type & ICE_CONTROLLED) ? 1 : 0;
+	snapshot->missed_count = ice->missed_count;
+	snapshot->last_ok = ice->last_ok;
+	snapshot->next_run = ice->next_run;
+	snapshot->tiebreaker = ice->tiebreaker;
+	snapshot->proto = proto;
+
+	snapshot->ice_user = ice->ice_user;
+	snapshot->user_ice = ice->user_ice;
+	snapshot->luser_ice = ice->luser_ice;
+
+	ice_snapshot_copy_cands(ice->ice_params, idx, snapshot->in_cands,
+							&snapshot->in_count, &snapshot->in_chosen, &snapshot->in_is_chosen,
+							&snapshot->in_ufrag, &snapshot->in_pwd);
+
+	ice_snapshot_copy_cands(ice->ice_params_out, idx, snapshot->out_cands,
+							&snapshot->out_count, &snapshot->out_chosen, &snapshot->out_is_chosen,
+							&snapshot->out_ufrag, &snapshot->out_pwd);
+
+	/* gen_ice() populates only ice_out.cands[0][0] and never bumps cand_idx, so
+	   the single local host candidate is gated by .ready instead of by a count.
+	   Surface that one candidate explicitly (a full outgoing candidate list and
+	   RFC 8445 candidate pairs are not maintained by the core yet). */
+	if (snapshot->out_count == 0 && ice->ice_params_out && ice->ice_params_out->cands[0][idx].ready) {
+		snapshot->out_cands[0] = ice->ice_params_out->cands[0][idx];
+		snapshot->out_count = 1;
+	}
+
+	switch_mutex_unlock(rtp_session->ice_mutex);
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
 SWITCH_DECLARE(int) switch_rtp_write_manual(switch_rtp_t *rtp_session,
 											void *data, uint32_t datalen, uint8_t m, switch_payload_t payload, uint32_t ts, switch_frame_flag_t *flags)
 {
