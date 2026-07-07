@@ -7856,13 +7856,29 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 			 * - media_timeout/rtp_timeout_sec do NOT help because ICE/STUN
 			 *   packets keep resetting the media timer.
 			 */
-			if (!bytes && rtp_session->dtls && rtp_session->dtls->state != DS_READY &&
-				(!(io_flags & SWITCH_IO_FLAG_NOBLOCK)) &&
-				(rtp_session->dtmf_data.out_digit_dur == 0)) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-					"C4B patch: returning CNG frame during DTLS handshake (dtls_state=%d, got_rtp_poll=%d)\n",
-					rtp_session->dtls->state, got_rtp_poll);
-				return_cng_frame();
+			/* Snapshot DTLS presence and state under ice_mutex. rtp_session->dtls
+			 * can be freed concurrently by switch_rtp_del_dtls(), which holds
+			 * ice_mutex; reading ->state without the lock would be a use-after-free
+			 * race (see upstream "add missing ice_mutex to protect dtls"). */
+			{
+				int dtls_handshaking = 0;
+				dtls_state_t dtls_state_snap = DS_OFF;
+
+				switch_mutex_lock(rtp_session->ice_mutex);
+				if (!bytes && rtp_session->dtls && rtp_session->dtls->state != DS_READY) {
+					dtls_handshaking = 1;
+					dtls_state_snap = rtp_session->dtls->state;
+				}
+				switch_mutex_unlock(rtp_session->ice_mutex);
+
+				if (dtls_handshaking &&
+					(!(io_flags & SWITCH_IO_FLAG_NOBLOCK)) &&
+					(rtp_session->dtmf_data.out_digit_dur == 0)) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+						"C4B patch: returning CNG frame during DTLS handshake (dtls_state=%d, got_rtp_poll=%d)\n",
+						dtls_state_snap, got_rtp_poll);
+					return_cng_frame();
+				}
 			}
 
 		} else {
