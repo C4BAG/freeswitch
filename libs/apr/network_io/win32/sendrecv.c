@@ -190,7 +190,15 @@ APR_DECLARE(fspr_status_t) fspr_socket_recvfrom(fspr_sockaddr_t *from,
 {
     fspr_ssize_t rv;
 
-    rv = recvfrom(sock->socketdes, buf, (int)*len, flags, 
+    /* Ensure the source-address buffer length covers an IPv6 sockaddr before
+       recvfrom(). Otherwise Windows recvfrom() returns WSAEFAULT when an IPv6
+       datagram arrives while from->salen still holds the smaller IPv4 size, so
+       the packet is never consumed (breaks IPv6 RTP/ICE receive on Windows;
+       Linux tolerates the short length). The unix path already does this; the
+       win32 path was missing it. */
+    from->salen = sizeof(from->sa);
+
+    rv = recvfrom(sock->socketdes, buf, (int)*len, flags,
                   (struct sockaddr*)&from->sa, &from->salen);
     if (rv == SOCKET_ERROR) {
         (*len) = 0;
