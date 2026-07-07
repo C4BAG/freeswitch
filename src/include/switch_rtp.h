@@ -123,6 +123,52 @@ typedef struct ice_s {
 
 } ice_t;
 
+/*!
+  Shallow snapshot of the ICE state for one protocol (RTP or RTCP).
+
+  Filled by switch_rtp_get_ice_snapshot() while holding ice_mutex. The candidate
+  arrays are copied by value (fixed-size icand_t structs) so the caller sees a
+  consistent snapshot even if the media thread keeps mutating the live arrays.
+  The string pointers inside the copied candidates and the credential pointers
+  are BORROWED from session-pool memory (stable while the session is rwlocked) -
+  there is no ownership and nothing to free.
+*/
+typedef struct {
+	uint8_t enabled;              /* ICE is active */
+	uint8_t sending;              /* currently sending STUN */
+	uint8_t ready;                /* local ICE state ready */
+	uint8_t rready;               /* remote ICE state ready */
+	uint8_t initializing;         /* in initialization phase */
+	uint8_t cand_responsive;      /* at least one candidate responsive */
+	uint8_t controlled;           /* 1 = ICE_CONTROLLED, 0 = controlling */
+	int missed_count;             /* missed STUN responses */
+	switch_time_t last_ok;        /* last successful response (microseconds) */
+	switch_time_t next_run;       /* next scheduled STUN run */
+	uint64_t tiebreaker;          /* RFC 8445 role tiebreaker */
+	ice_proto_t proto;            /* IPR_RTP or IPR_RTCP */
+
+	/* Credentials (borrowed pointers) */
+	const char *ice_user;         /* local:remote username */
+	const char *user_ice;         /* remote:local username */
+	const char *luser_ice;        /* local ICE username */
+
+	/* Incoming candidates (from remote SDP) */
+	const char *in_ufrag;
+	const char *in_pwd;
+	int in_count;
+	int in_chosen;
+	int in_is_chosen;
+	icand_t in_cands[MAX_CAND];
+
+	/* Outgoing candidates (our local candidates) */
+	const char *out_ufrag;
+	const char *out_pwd;
+	int out_count;
+	int out_chosen;
+	int out_is_chosen;
+	icand_t out_cands[MAX_CAND];
+} switch_rtp_ice_snapshot_t;
+
 typedef enum { /* RTCP Control Packet types (PT) http://www.iana.org/assignments/rtp-parameters/rtp-parameters.xhtml#rtp-parameters-4 */
 	_RTCP_PT_FIR   = 192, /* [RFC 2032] RTP Payload Format for H.261 Video Streams. types 192 (FIR) section 5.2.1 */
 	_RTCP_PT_IJ    = 195, /* IJ: Extended inter-arrival jitter report RFC5450*/
@@ -593,6 +639,24 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_payload_map(switch_rtp_t *rtp_ses
 SWITCH_DECLARE(void) switch_rtp_intentional_bugs(switch_rtp_t *rtp_session, switch_rtp_bug_flag_t bugs);
 
 SWITCH_DECLARE(switch_rtp_stats_t *) switch_rtp_get_stats(switch_rtp_t *rtp_session, switch_memory_pool_t *pool);
+
+/*!
+  \brief Check if ICE is active on an RTP session for the given protocol
+  \param rtp_session the RTP session
+  \param proto ICE protocol (IPR_RTP or IPR_RTCP)
+  \return SWITCH_TRUE if ICE is active, SWITCH_FALSE otherwise
+*/
+SWITCH_DECLARE(switch_bool_t) switch_rtp_has_ice(switch_rtp_t *rtp_session, ice_proto_t proto);
+
+/*!
+  \brief Fill a shallow snapshot of the ICE state under ice_mutex
+  \param rtp_session the RTP session
+  \param proto ICE protocol (IPR_RTP or IPR_RTCP)
+  \param snapshot caller-provided buffer to fill (borrowed string pointers, no free needed)
+  \return SWITCH_STATUS_SUCCESS if ICE is active and the snapshot was filled, SWITCH_STATUS_FALSE otherwise
+*/
+SWITCH_DECLARE(switch_status_t) switch_rtp_get_ice_snapshot(switch_rtp_t *rtp_session, ice_proto_t proto, switch_rtp_ice_snapshot_t *snapshot);
+
 SWITCH_DECLARE(switch_byte_t) switch_rtp_check_auto_adj(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(void) switch_rtp_set_interdigit_delay(switch_rtp_t *rtp_session, uint32_t delay);
 

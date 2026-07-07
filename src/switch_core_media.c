@@ -13544,6 +13544,40 @@ SWITCH_DECLARE(switch_rtp_stats_t *) switch_core_media_get_stats(switch_core_ses
 	return NULL;
 }
 
+SWITCH_DECLARE(switch_bool_t) switch_core_media_has_ice(switch_core_session_t *session, switch_media_type_t type, ice_proto_t proto)
+{
+	switch_media_handle_t *smh;
+
+	switch_assert(session);
+
+	if (!(smh = session->media_handle)) {
+		return SWITCH_FALSE;
+	}
+
+	if (smh->engines[type].rtp_session) {
+		return switch_rtp_has_ice(smh->engines[type].rtp_session, proto);
+	}
+
+	return SWITCH_FALSE;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_core_media_get_ice_snapshot(switch_core_session_t *session, switch_media_type_t type, ice_proto_t proto, switch_rtp_ice_snapshot_t *snapshot)
+{
+	switch_media_handle_t *smh;
+
+	switch_assert(session);
+
+	if (!(smh = session->media_handle)) {
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (smh->engines[type].rtp_session) {
+		return switch_rtp_get_ice_snapshot(smh->engines[type].rtp_session, proto, snapshot);
+	}
+
+	return SWITCH_STATUS_FALSE;
+}
+
 //?
 SWITCH_DECLARE(switch_bool_t) switch_core_media_check_udptl_mode(switch_core_session_t *session, switch_media_type_t type)
 {

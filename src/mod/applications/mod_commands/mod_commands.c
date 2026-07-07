@@ -6621,6 +6621,458 @@ SWITCH_STANDARD_API(uuid_dump_function)
 	return SWITCH_STATUS_SUCCESS;
 }
 
+/* FNV-1a 32-bit fingerprint helpers for uuid_dump_ice */
+#define ICE_FNV_OFFSET 2166136261u
+#define ICE_FNV_PRIME 16777619u
+
+static uint32_t ice_fnv_bytes(uint32_t h, const void *data, switch_size_t len)
+{
+	const unsigned char *p = (const unsigned char *) data;
+	switch_size_t i;
+
+	for (i = 0; i < len; i++) {
+		h ^= p[i];
+		h *= ICE_FNV_PRIME;
+	}
+	return h;
+}
+
+static uint32_t ice_fnv_str(uint32_t h, const char *s)
+{
+	unsigned char nul = 0;
+
+	if (!s) {
+		return ice_fnv_bytes(h, &nul, 1);
+	}
+	return ice_fnv_bytes(h, s, strlen(s) + 1);
+}
+
+static uint32_t ice_fnv_u32(uint32_t h, uint32_t v)
+{
+	return ice_fnv_bytes(h, &v, sizeof(v));
+}
+
+/* Age of a switch_time_t (microseconds) relative to now, in milliseconds. Returns -1 if unset. */
+static int64_t ice_age_ms(switch_time_t now, switch_time_t t)
+{
+	if (t == 0 || t > now) {
+		return -1;
+	}
+	return (int64_t) ((now - t) / 1000);
+}
+
+/* Fold one ICE snapshot into the info and debug fingerprints.
+   info  = role + ready/rready + selected pair identity (stable across polls).
+   debug = info + full candidate identity and per-candidate state.
+   Volatile fields (timestamps, sending, missed_count, tiebreaker) are excluded from both. */
+static void ice_hash_accum(switch_rtp_ice_snapshot_t *s, const char *media, uint32_t *hi, uint32_t *hd)
+{
+	int i;
+	uint32_t vi = *hi, vd = *hd;
+
+#define ACC_BOTH_STR(x) do { vi = ice_fnv_str(vi, (x)); vd = ice_fnv_str(vd, (x)); } while (0)
+#define ACC_BOTH_U32(x) do { vi = ice_fnv_u32(vi, (x)); vd = ice_fnv_u32(vd, (x)); } while (0)
+
+	ACC_BOTH_STR(media);
+	ACC_BOTH_U32((uint32_t) s->proto);
+	ACC_BOTH_U32(s->controlled);
+	ACC_BOTH_U32(s->ready);
+	ACC_BOTH_U32(s->rready);
+	ACC_BOTH_U32((uint32_t) s->in_is_chosen);
+	ACC_BOTH_U32((uint32_t) s->in_chosen);
+
+	if (s->in_is_chosen && s->in_chosen >= 0 && s->in_chosen < s->in_count) {
+		icand_t *c = &s->in_cands[s->in_chosen];
+		ACC_BOTH_STR(c->cand_type);
+		ACC_BOTH_STR(c->con_addr);
+		ACC_BOTH_U32((uint32_t) c->con_port);
+		ACC_BOTH_STR(c->foundation);
+		ACC_BOTH_U32(c->use_candidate);
+	}
+
+	/* debug-only: full candidate lists */
+	for (i = 0; i < s->in_count; i++) {
+		icand_t *c = &s->in_cands[i];
+		vd = ice_fnv_str(vd, c->cand_type);
+		vd = ice_fnv_str(vd, c->con_addr);
+		vd = ice_fnv_u32(vd, (uint32_t) c->con_port);
+		vd = ice_fnv_u32(vd, c->priority);
+		vd = ice_fnv_str(vd, c->foundation);
+		vd = ice_fnv_u32(vd, c->responsive);
+		vd = ice_fnv_u32(vd, c->ready);
+		vd = ice_fnv_u32(vd, c->use_candidate);
+		vd = ice_fnv_u32(vd, (uint32_t) c->acl_passed);
+	}
+	for (i = 0; i < s->out_count; i++) {
+		icand_t *c = &s->out_cands[i];
+		vd = ice_fnv_str(vd, c->cand_type);
+		vd = ice_fnv_str(vd, c->con_addr);
+		vd = ice_fnv_u32(vd, (uint32_t) c->con_port);
+		vd = ice_fnv_u32(vd, c->priority);
+		vd = ice_fnv_str(vd, c->foundation);
+	}
+
+#undef ACC_BOTH_STR
+#undef ACC_BOTH_U32
+
+	*hi = vi;
+	*hd = vd;
+}
+
+/* Format an ICE candidate address and port as host:port, bracketing IPv6 literals ([addr]:port). */
+static void ice_fmt_hostport(char *buf, switch_size_t buflen, const char *addr, switch_port_t port)
+{
+	if (!addr) {
+		switch_snprintf(buf, buflen, "?:%d", port);
+	} else if (strchr(addr, ':')) {
+		switch_snprintf(buf, buflen, "[%s]:%d", addr, port);
+	} else {
+		switch_snprintf(buf, buflen, "%s:%d", addr, port);
+	}
+}
+
+/* Text rendering of one (media, proto) ICE section */
+static void ice_dump_text_section(switch_stream_handle_t *stream, switch_rtp_ice_snapshot_t *s,
+								  const char *media_abbr, const char *proto_lc, const char *proto_uc, switch_time_t now)
+{
+	int i;
+	int64_t age;
+	char agebuf[32];
+
+	stream->write_function(stream, "  %-4s  state: ready=%s rready=%s sending=%s initializing=%s cand_responsive=%s\n",
+						   proto_uc,
+						   s->ready ? "yes" : "no", s->rready ? "yes" : "no", s->sending ? "yes" : "no",
+						   s->initializing ? "yes" : "no", s->cand_responsive ? "yes" : "no");
+
+	age = ice_age_ms(now, s->last_ok);
+	if (age < 0) {
+		switch_snprintf(agebuf, sizeof(agebuf), "%s", "-");
+	} else {
+		switch_snprintf(agebuf, sizeof(agebuf), "%ldms ago", (long) age);
+	}
+	stream->write_function(stream, "        ufrag: local=%s remote=%s   missed=%d  last_ok=%s\n",
+						   s->out_ufrag ? s->out_ufrag : "", s->in_ufrag ? s->in_ufrag : "", s->missed_count, agebuf);
+
+	stream->write_function(stream, "        Local candidates (out): %d\n", s->out_count);
+	stream->write_function(stream, "          %-13s %-6s %-21s %-3s %-15s %s\n",
+						   "id", "type", "address:port", "tr", "priority", "found");
+	for (i = 0; i < s->out_count; i++) {
+		icand_t *c = &s->out_cands[i];
+		char idbuf[24], hpbuf[64];
+		switch_snprintf(idbuf, sizeof(idbuf), "%s.%s.L%d", media_abbr, proto_lc, i);
+		ice_fmt_hostport(hpbuf, sizeof(hpbuf), c->con_addr, c->con_port);
+		stream->write_function(stream, "          %-13s %-6s %-21s %-3s prio=%-10u found=%s",
+							   idbuf, c->cand_type ? c->cand_type : "?", hpbuf,
+							   c->transport ? c->transport : "udp",
+							   c->priority, c->foundation ? c->foundation : "?");
+		if (c->raddr) {
+			char rbuf[64];
+			ice_fmt_hostport(rbuf, sizeof(rbuf), c->raddr, c->rport);
+			stream->write_function(stream, " raddr=%s", rbuf);
+		}
+		stream->write_function(stream, "\n");
+	}
+
+	if (s->in_is_chosen && s->in_chosen >= 0) {
+		stream->write_function(stream, "        Remote candidates (in): %d   chosen=R%d\n", s->in_count, s->in_chosen);
+	} else {
+		stream->write_function(stream, "        Remote candidates (in): %d   chosen=- (none nominated yet)\n", s->in_count);
+	}
+	for (i = 0; i < s->in_count; i++) {
+		icand_t *c = &s->in_cands[i];
+		int sel = (s->in_is_chosen && i == s->in_chosen);
+		char idbuf[24], hpbuf[64];
+		age = ice_age_ms(now, c->stun_rcv_use_last);
+		if (age < 0) {
+			switch_snprintf(agebuf, sizeof(agebuf), "%s", "-");
+		} else {
+			switch_snprintf(agebuf, sizeof(agebuf), "%ldms", (long) age);
+		}
+		switch_snprintf(idbuf, sizeof(idbuf), "%s.%s.R%d", media_abbr, proto_lc, i);
+		ice_fmt_hostport(hpbuf, sizeof(hpbuf), c->con_addr, c->con_port);
+		stream->write_function(stream, "          %-13s %-6s %-21s %-3s prio=%-10u resp=%-3s nom=%-3s ready=%d acl=%s last_stun=%-7s%s\n",
+							   idbuf, c->cand_type ? c->cand_type : "?", hpbuf,
+							   c->transport ? c->transport : "udp",
+							   c->priority,
+							   c->responsive ? "yes" : "no",
+							   c->use_candidate ? "YES" : "no",
+							   c->ready,
+							   c->acl_passed ? "Y" : "N",
+							   agebuf,
+							   sel ? "  <== SELECTED" : "");
+	}
+
+	if (s->in_is_chosen && s->in_chosen >= 0 && s->in_chosen < s->in_count) {
+		icand_t *c = &s->in_cands[s->in_chosen];
+		char hpbuf[64];
+		ice_fmt_hostport(hpbuf, sizeof(hpbuf), c->con_addr, c->con_port);
+		stream->write_function(stream, "        Selected pair: R%d (%s %s)  nominated=%s\n",
+							   s->in_chosen, c->cand_type ? c->cand_type : "?",
+							   hpbuf,
+							   c->use_candidate ? "yes" : "no");
+	} else {
+		stream->write_function(stream, "        Selected pair: none (checking)\n");
+	}
+}
+
+/* Build a cJSON object for one candidate */
+static cJSON *ice_json_candidate(icand_t *c, const char *id, int is_remote, switch_time_t now)
+{
+	cJSON *o = cJSON_CreateObject();
+
+	cJSON_AddItemToObject(o, "id", cJSON_CreateString(id));
+	cJSON_AddItemToObject(o, "type", cJSON_CreateString(c->cand_type ? c->cand_type : ""));
+	cJSON_AddItemToObject(o, "protocol", cJSON_CreateString(c->transport ? c->transport : "udp"));
+	cJSON_AddItemToObject(o, "address", cJSON_CreateString(c->con_addr ? c->con_addr : ""));
+	cJSON_AddItemToObject(o, "port", cJSON_CreateNumber(c->con_port));
+	cJSON_AddItemToObject(o, "priority", cJSON_CreateNumber((double) c->priority));
+	cJSON_AddItemToObject(o, "foundation", cJSON_CreateString(c->foundation ? c->foundation : ""));
+	if (c->raddr) {
+		cJSON_AddItemToObject(o, "relatedAddress", cJSON_CreateString(c->raddr));
+		cJSON_AddItemToObject(o, "relatedPort", cJSON_CreateNumber(c->rport));
+	}
+	if (is_remote) {
+		int64_t age = ice_age_ms(now, c->stun_rcv_use_last);
+		cJSON_AddItemToObject(o, "responsive", cJSON_CreateBool(c->responsive));
+		cJSON_AddItemToObject(o, "nominated", cJSON_CreateBool(c->use_candidate));
+		cJSON_AddItemToObject(o, "ready", cJSON_CreateNumber(c->ready));
+		cJSON_AddItemToObject(o, "acl_passed", cJSON_CreateBool(c->acl_passed));
+		if (age < 0) {
+			cJSON_AddItemToObject(o, "last_stun_age_ms", cJSON_CreateNull());
+		} else {
+			cJSON_AddItemToObject(o, "last_stun_age_ms", cJSON_CreateNumber((double) age));
+		}
+	}
+	return o;
+}
+
+/* Build a cJSON object for one (media, proto) ICE section */
+static cJSON *ice_json_section(switch_rtp_ice_snapshot_t *s, const char *media_abbr, const char *proto_lc, switch_time_t now)
+{
+	cJSON *sec = cJSON_CreateObject();
+	cJSON *state = cJSON_CreateObject();
+	cJSON *ufrag = cJSON_CreateObject();
+	cJSON *loc = cJSON_CreateArray();
+	cJSON *rem = cJSON_CreateArray();
+	int i;
+	int64_t age;
+	char id[64];
+
+	cJSON_AddItemToObject(state, "ready", cJSON_CreateBool(s->ready));
+	cJSON_AddItemToObject(state, "rready", cJSON_CreateBool(s->rready));
+	cJSON_AddItemToObject(state, "sending", cJSON_CreateBool(s->sending));
+	cJSON_AddItemToObject(state, "initializing", cJSON_CreateBool(s->initializing));
+	cJSON_AddItemToObject(state, "cand_responsive", cJSON_CreateBool(s->cand_responsive));
+	cJSON_AddItemToObject(sec, "state", state);
+
+	cJSON_AddItemToObject(ufrag, "local", cJSON_CreateString(s->out_ufrag ? s->out_ufrag : ""));
+	cJSON_AddItemToObject(ufrag, "remote", cJSON_CreateString(s->in_ufrag ? s->in_ufrag : ""));
+	cJSON_AddItemToObject(sec, "ufrag", ufrag);
+
+	cJSON_AddItemToObject(sec, "missed_count", cJSON_CreateNumber(s->missed_count));
+	age = ice_age_ms(now, s->last_ok);
+	if (age < 0) {
+		cJSON_AddItemToObject(sec, "last_ok_age_ms", cJSON_CreateNull());
+	} else {
+		cJSON_AddItemToObject(sec, "last_ok_age_ms", cJSON_CreateNumber((double) age));
+	}
+
+	for (i = 0; i < s->out_count; i++) {
+		switch_snprintf(id, sizeof(id), "%s.%s.L%d", media_abbr, proto_lc, i);
+		cJSON_AddItemToArray(loc, ice_json_candidate(&s->out_cands[i], id, 0, now));
+	}
+	cJSON_AddItemToObject(sec, "local_candidates", loc);
+
+	for (i = 0; i < s->in_count; i++) {
+		switch_snprintf(id, sizeof(id), "%s.%s.R%d", media_abbr, proto_lc, i);
+		cJSON_AddItemToArray(rem, ice_json_candidate(&s->in_cands[i], id, 1, now));
+	}
+	cJSON_AddItemToObject(sec, "remote_candidates", rem);
+
+	if (s->in_is_chosen && s->in_chosen >= 0 && s->in_chosen < s->in_count) {
+		cJSON *sp = cJSON_CreateObject();
+		switch_snprintf(id, sizeof(id), "%s.%s.R%d", media_abbr, proto_lc, s->in_chosen);
+		cJSON_AddItemToObject(sp, "remote", cJSON_CreateString(id));
+		cJSON_AddItemToObject(sp, "nominated", cJSON_CreateBool(s->in_cands[s->in_chosen].use_candidate));
+		cJSON_AddItemToObject(sec, "selected_pair", sp);
+	} else {
+		cJSON_AddItemToObject(sec, "selected_pair", cJSON_CreateNull());
+	}
+
+	return sec;
+}
+
+#define DUMP_ICE_SYNTAX "<uuid> [txt|json|hash [info|debug]]"
+SWITCH_STANDARD_API(uuid_dump_ice_function)
+{
+	switch_core_session_t *psession = NULL;
+	char *mycmd = NULL, *argv[3] = { 0 };
+	int argc = 0;
+
+	static const struct { switch_media_type_t type; const char *name; const char *title; const char *abbr; } medias[] = {
+		{ SWITCH_MEDIA_TYPE_AUDIO, "audio", "Audio", "aud" },
+		{ SWITCH_MEDIA_TYPE_VIDEO, "video", "Video", "vid" }
+	};
+	static const struct { ice_proto_t proto; const char *lc; const char *uc; } protos[] = {
+		{ IPR_RTP, "rtp", "RTP" },
+		{ IPR_RTCP, "rtcp", "RTCP" }
+	};
+	const int n_media = (int) (sizeof(medias) / sizeof(medias[0]));
+	const int n_proto = (int) (sizeof(protos) / sizeof(protos[0]));
+
+	if (!zstr(cmd) && (mycmd = strdup(cmd))) {
+		argc = switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
+		if (argc >= 1 && !zstr(argv[0])) {
+			char *uuid = argv[0];
+			char *format = argv[1];
+			char *hlevel = argv[2];
+
+			if (!format) {
+				format = "txt";
+			}
+
+			if (strcasecmp(format, "txt") && strcasecmp(format, "json") && strcasecmp(format, "hash")) {
+				stream->write_function(stream, "-ERR unsupported format '%s'. USAGE: %s\n", format, DUMP_ICE_SYNTAX);
+				goto done;
+			}
+
+			if ((psession = switch_core_session_locate(uuid))) {
+				switch_rtp_ice_snapshot_t *snap = malloc(sizeof(*snap));
+				switch_time_t now = switch_micro_time_now();
+				uint32_t hi = ICE_FNV_OFFSET, hd = ICE_FNV_OFFSET;
+				int any = 0, role_controlled = 0, m, p;
+				uint64_t tiebreaker = 0;
+				switch_channel_t *channel = switch_core_session_get_channel(psession);
+				const char *dir = (switch_channel_direction(channel) == SWITCH_CALL_DIRECTION_OUTBOUND) ? "outbound" : "inbound";
+
+				if (!snap) {
+					stream->write_function(stream, "-ERR Allocation error\n");
+					switch_core_session_rwunlock(psession);
+					goto done;
+				}
+
+				/* Pass 1: fold both fingerprints and capture the role/tiebreaker from the first section found */
+				for (m = 0; m < n_media; m++) {
+					for (p = 0; p < n_proto; p++) {
+						if (switch_core_media_get_ice_snapshot(psession, medias[m].type, protos[p].proto, snap) == SWITCH_STATUS_SUCCESS) {
+							if (!any) {
+								role_controlled = snap->controlled;
+								tiebreaker = snap->tiebreaker;
+							}
+							any = 1;
+							ice_hash_accum(snap, medias[m].name, &hi, &hd);
+						}
+					}
+				}
+
+				if (!any) {
+					stream->write_function(stream, "-ERR ICE not used by channel\n");
+					free(snap);
+					switch_core_session_rwunlock(psession);
+					goto done;
+				}
+
+				if (!strcasecmp(format, "hash")) {
+					if (hlevel && !strcasecmp(hlevel, "info")) {
+						stream->write_function(stream, "%08x\n", hi);
+					} else if (hlevel && !strcasecmp(hlevel, "debug")) {
+						stream->write_function(stream, "%08x\n", hd);
+					} else {
+						stream->write_function(stream, "info=%08x debug=%08x\n", hi, hd);
+					}
+				} else if (!strcasecmp(format, "json")) {
+					cJSON *json = cJSON_CreateObject();
+					cJSON *media = cJSON_CreateObject();
+					char hbuf[32];
+					char *out;
+
+					cJSON_AddItemToObject(json, "uuid", cJSON_CreateString(uuid));
+					cJSON_AddItemToObject(json, "direction", cJSON_CreateString(dir));
+					cJSON_AddItemToObject(json, "role", cJSON_CreateString(role_controlled ? "controlled" : "controlling"));
+					cJSON_AddItemToObject(json, "tiebreaker", cJSON_CreateNumber((double) tiebreaker));
+					switch_snprintf(hbuf, sizeof(hbuf), "%08x", hi);
+					cJSON_AddItemToObject(json, "hash_info", cJSON_CreateString(hbuf));
+					switch_snprintf(hbuf, sizeof(hbuf), "%08x", hd);
+					cJSON_AddItemToObject(json, "hash_debug", cJSON_CreateString(hbuf));
+
+					for (m = 0; m < n_media; m++) {
+						cJSON *mobj = NULL;
+						int found_rtp = 0, found_rtcp = 0;
+						for (p = 0; p < n_proto; p++) {
+							if (switch_core_media_get_ice_snapshot(psession, medias[m].type, protos[p].proto, snap) == SWITCH_STATUS_SUCCESS) {
+								if (!mobj) {
+									mobj = cJSON_CreateObject();
+								}
+								cJSON_AddItemToObject(mobj, protos[p].lc, ice_json_section(snap, medias[m].abbr, protos[p].lc, now));
+								if (protos[p].proto == IPR_RTP) {
+									found_rtp = 1;
+								} else {
+									found_rtcp = 1;
+								}
+							}
+						}
+						if (mobj) {
+							if (found_rtp && !found_rtcp) {
+								cJSON *rtcp = cJSON_CreateObject();
+								cJSON_AddItemToObject(rtcp, "muxed", cJSON_CreateBool(1));
+								cJSON_AddItemToObject(mobj, "rtcp", rtcp);
+							}
+							cJSON_AddItemToObject(media, medias[m].name, mobj);
+						}
+					}
+					cJSON_AddItemToObject(json, "media", media);
+
+					out = cJSON_PrintUnformatted(json);
+					stream->write_function(stream, "%s\n", out ? out : "{}");
+					switch_safe_free(out);
+					cJSON_Delete(json);
+				} else {
+					/* text */
+					stream->write_function(stream, "ICE Status  uuid=%s\n", uuid);
+					stream->write_function(stream, "  direction=%s  role=%s  tiebreaker=%llu   hash_info=%08x hash_debug=%08x\n",
+										   dir,
+										   role_controlled ? "CONTROLLED" : "CONTROLLING",
+										   (unsigned long long) tiebreaker, hi, hd);
+
+					for (m = 0; m < n_media; m++) {
+						int printed_media = 0, found_rtp = 0, found_rtcp = 0;
+						for (p = 0; p < n_proto; p++) {
+							if (switch_core_media_get_ice_snapshot(psession, medias[m].type, protos[p].proto, snap) == SWITCH_STATUS_SUCCESS) {
+								if (!printed_media) {
+									stream->write_function(stream, "\n%s\n", medias[m].title);
+									printed_media = 1;
+								}
+								ice_dump_text_section(stream, snap, medias[m].abbr, protos[p].lc, protos[p].uc, now);
+								if (protos[p].proto == IPR_RTP) {
+									found_rtp = 1;
+								} else {
+									found_rtcp = 1;
+								}
+							}
+						}
+						if (printed_media && found_rtp && !found_rtcp) {
+							stream->write_function(stream, "  RTCP  muxed with RTP (no separate component)\n");
+						}
+					}
+				}
+
+				free(snap);
+				switch_core_session_rwunlock(psession);
+
+			} else {
+				stream->write_function(stream, "-ERR No such channel!\n");
+			}
+			goto done;
+		}
+	}
+
+	stream->write_function(stream, "-USAGE: %s\n", DUMP_ICE_SYNTAX);
+
+done:
+	switch_safe_free(mycmd);
+	return SWITCH_STATUS_SUCCESS;
+}
+
 #define GLOBAL_SETVAR_SYNTAX "<var>=<value> [=<value2>]"
 SWITCH_STANDARD_API(global_setvar_function)
 {
@@ -7803,6 +8255,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_commands_load)
 	SWITCH_ADD_API(commands_api_interface, "uuid_media_params", "Update remote vid params", uuid_media_params_function, MEDIA_PARAMS_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_drop_dtmf", "Drop all DTMF or replace it with a mask", uuid_drop_dtmf, UUID_DROP_DTMF_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_dump", "Dump session vars", uuid_dump_function, DUMP_SYNTAX);
+	SWITCH_ADD_API(commands_api_interface, "uuid_dump_ice", "Dump ice state and candidates", uuid_dump_ice_function, DUMP_ICE_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_exists", "Check if a uuid exists", uuid_exists_function, EXISTS_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_fileman", "Manage session audio", uuid_fileman_function, FILEMAN_SYNTAX);
 	SWITCH_ADD_API(commands_api_interface, "uuid_flush_dtmf", "Flush dtmf on a given uuid", uuid_flush_dtmf_function, "<uuid>");
@@ -7998,6 +8451,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_commands_load)
 	switch_console_set_complete("add uuid_media_params ::console::list_uuid");
 	switch_console_set_complete("add uuid_drop_dtmf ::console::list_uuid");
 	switch_console_set_complete("add uuid_dump ::console::list_uuid");
+	switch_console_set_complete("add uuid_dump_ice ::console::list_uuid");
 	switch_console_set_complete("add uuid_answer ::console::list_uuid");
 	switch_console_set_complete("add uuid_ring_ready ::console::list_uuid queued");
 	switch_console_set_complete("add uuid_pre_answer ::console::list_uuid");
