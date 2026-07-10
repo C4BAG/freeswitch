@@ -3772,6 +3772,9 @@ static void clear_ice(switch_core_session_t *session, switch_media_type_t type)
 
 	engine = &smh->engines[type];
 
+	/* Clearing ice_in races the media thread that reads it under ice_mutex; serialize.
+	   NULL-safe before media is running. */
+	switch_rtp_ice_lock(engine->rtp_session);
 	engine->ice_in.chosen[0] = 0;
 	engine->ice_in.chosen[1] = 0;
 	engine->ice_in.is_chosen[0] = 0;
@@ -3779,6 +3782,7 @@ static void clear_ice(switch_core_session_t *session, switch_media_type_t type)
 	engine->ice_in.cand_idx[0] = 0;
 	engine->ice_in.cand_idx[1] = 0;
 	memset(&engine->ice_in, 0, sizeof(engine->ice_in));
+	switch_rtp_ice_unlock(engine->rtp_session);
 	engine->remote_rtcp_port = 0;
 
 	if (engine->rtp_session) {
@@ -4095,6 +4099,11 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		//return SWITCH_STATUS_SUCCESS;
 	//}
 
+	/* Serialize the ice_in mutation (reset/parse/sort/chosen selection) against the media
+	   thread, which reads engine->ice_in under ice_mutex. NULL-safe when media is not yet
+	   running (initial setup); relevant on re-INVITE / ICE restart. */
+	switch_rtp_ice_lock(engine->rtp_session);
+
 	engine->ice_in.chosen[0] = 0;
 	engine->ice_in.chosen[1] = 0;
 	engine->ice_in.is_chosen[0] = 0;
@@ -4301,6 +4310,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	}
 
 	if (!ice_seen) {
+		switch_rtp_ice_unlock(engine->rtp_session);
 		return SWITCH_STATUS_SUCCESS;
 	}
 
@@ -4369,6 +4379,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		/* PUNT */
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_DEBUG, "%s no suitable candidates found.\n",
 						  switch_channel_get_name(smh->session->channel));
+		switch_rtp_ice_unlock(engine->rtp_session);
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -4530,6 +4541,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 
 	}
 
+	switch_rtp_ice_unlock(engine->rtp_session);
 	return ice_seen ? SWITCH_STATUS_SUCCESS : SWITCH_STATUS_BREAK;
 }
 #ifdef _MSC_VER
@@ -8501,6 +8513,10 @@ static void gen_ice(switch_core_session_t *session, switch_media_type_t type, co
 
 	engine = &smh->engines[type];
 
+	/* gen_ice writes engine->ice_out, which the media thread reads (via ice_params_out)
+	   under ice_mutex; serialize on re-generation. NULL-safe before media is running. */
+	switch_rtp_ice_lock(engine->rtp_session);
+
 	//#ifdef RTCP_MUX
 	//if (!engine->rtcp_mux) {//  && type == SWITCH_MEDIA_TYPE_AUDIO) {
 	//	engine->rtcp_mux = SWITCH_TRUE;
@@ -8557,7 +8573,7 @@ static void gen_ice(switch_core_session_t *session, switch_media_type_t type, co
 
 	engine->ice_out.cands[0][0].ready = 1;
 
-
+	switch_rtp_ice_unlock(engine->rtp_session);
 }
 
 SWITCH_DECLARE(void) switch_core_session_wake_video_thread(switch_core_session_t *session)
@@ -14126,21 +14142,33 @@ SWITCH_DECLARE(void) switch_core_session_stop_media(switch_core_session_t *sessi
 
 	smh->msid = NULL;
 	smh->cname = NULL;
+
+	/* Reset each engine's outgoing ICE params under its own ice_mutex so the media thread
+	   does not read half-cleared ice_out via ice_params_out; also clear ready so a snapshot
+	   cannot copy a candidate with a NULL foundation after the reset. */
+	switch_rtp_ice_lock(v_engine->rtp_session);
 	v_engine->ice_out.ufrag = NULL;
 	v_engine->ice_out.pwd = NULL;
 	v_engine->ice_out.cands[0][0].foundation = NULL;
 	v_engine->ice_out.cands[0][0].component_id = 0;
+	v_engine->ice_out.cands[0][0].ready = 0;
+	switch_rtp_ice_unlock(v_engine->rtp_session);
 
+	switch_rtp_ice_lock(t_engine->rtp_session);
 	t_engine->ice_out.ufrag = NULL;
 	t_engine->ice_out.pwd = NULL;
 	t_engine->ice_out.cands[0][0].foundation = NULL;
 	t_engine->ice_out.cands[0][0].component_id = 0;
+	t_engine->ice_out.cands[0][0].ready = 0;
+	switch_rtp_ice_unlock(t_engine->rtp_session);
 
-
+	switch_rtp_ice_lock(a_engine->rtp_session);
 	a_engine->ice_out.ufrag = NULL;
 	a_engine->ice_out.pwd = NULL;
 	a_engine->ice_out.cands[0][0].foundation = NULL;
 	a_engine->ice_out.cands[0][0].component_id = 0;
+	a_engine->ice_out.cands[0][0].ready = 0;
+	switch_rtp_ice_unlock(a_engine->rtp_session);
 
 	if (v_engine->ice_in.cands[v_engine->ice_in.chosen[0]][0].ready) {
 		gen_ice(smh->session, SWITCH_MEDIA_TYPE_VIDEO, NULL, 0);

@@ -969,8 +969,19 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	switch_time_t now = switch_micro_time_now();
 	switch_channel_t *channel;
 	switch_event_t *event;
+	switch_core_media_ice_type_t ice_type;
+	uint64_t ice_tiebreaker;
 
-	if (ice->type & ICE_LITE) {
+	/* Snapshot role + tiebreaker under ice_mutex once: handle_ice mutates them together on
+	   a role switch while holding the mutex, and ice_out is also called from the timer path
+	   without it. Using the locals below avoids a torn read of the (role, tiebreaker) pair.
+	   ice_mutex is nested, so the call from handle_ice (which already holds it) is safe. */
+	switch_mutex_lock(rtp_session->ice_mutex);
+	ice_type = ice->type;
+	ice_tiebreaker = ice->tiebreaker;
+	switch_mutex_unlock(rtp_session->ice_mutex);
+
+	if (ice_type & ICE_LITE) {
 		// no connectivity checks for ICE-Lite
 		return SWITCH_STATUS_BREAK;
 	}
@@ -1024,17 +1035,17 @@ static switch_status_t ice_out(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice,
 	//	switch_stun_packet_attribute_add_password(packet, ice->pass, (uint16_t)strlen(ice->pass));
 	//}
 
-	if ((ice->type & ICE_VANILLA)) {
+	if ((ice_type & ICE_VANILLA)) {
 		char sw[128] = "";
 		switch_stun_packet_attribute_add_priority(packet, change_candidate_priority_prflx(ice, ice->ice_params->cands[ice->ice_params->chosen[ice->proto]][ice->proto].priority));
 
 		switch_snprintf(sw, sizeof(sw), "FreeSWITCH (%s)", switch_version_revision_human());
 		switch_stun_packet_attribute_add_software(packet, sw, (uint16_t)strlen(sw));
 
-		if ((ice->type & ICE_CONTROLLED)) {
-			switch_stun_packet_attribute_add_controlled(packet, ice->tiebreaker);
+		if ((ice_type & ICE_CONTROLLED)) {
+			switch_stun_packet_attribute_add_controlled(packet, ice_tiebreaker);
 		} else {
-			switch_stun_packet_attribute_add_controlling(packet, ice->tiebreaker);
+			switch_stun_packet_attribute_add_controlling(packet, ice_tiebreaker);
 			switch_stun_packet_attribute_add_use_candidate(packet);
 		}
 
@@ -9448,6 +9459,25 @@ static void ice_snapshot_copy_cands(ice_t *src, int idx, icand_t *dst, int *coun
 	*is_chosen = src->is_chosen[idx];
 	*ufrag = src->ufrag;
 	*pwd = src->pwd;
+}
+
+/* Let the signaling thread (switch_core_media.c) serialize its mutation of the media
+   engine's ice_in/ice_out arrays against this rtp_session's media thread, which reads
+   them under ice_mutex. NULL-safe: before media is running there is no rtp_session and
+   the call is a no-op. ice_mutex is nested, so re-locking within an already-locked path
+   (e.g. switch_rtp_activate_ice_v2) is safe. */
+SWITCH_DECLARE(void) switch_rtp_ice_lock(switch_rtp_t *rtp_session)
+{
+	if (rtp_session && rtp_session->ice_mutex) {
+		switch_mutex_lock(rtp_session->ice_mutex);
+	}
+}
+
+SWITCH_DECLARE(void) switch_rtp_ice_unlock(switch_rtp_t *rtp_session)
+{
+	if (rtp_session && rtp_session->ice_mutex) {
+		switch_mutex_unlock(rtp_session->ice_mutex);
+	}
 }
 
 SWITCH_DECLARE(switch_status_t) switch_rtp_get_ice_snapshot(switch_rtp_t *rtp_session, ice_proto_t proto, switch_rtp_ice_snapshot_t *snapshot)

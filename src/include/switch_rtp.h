@@ -657,6 +657,14 @@ SWITCH_DECLARE(switch_bool_t) switch_rtp_has_ice(switch_rtp_t *rtp_session, ice_
 */
 SWITCH_DECLARE(switch_status_t) switch_rtp_get_ice_snapshot(switch_rtp_t *rtp_session, ice_proto_t proto, switch_rtp_ice_snapshot_t *snapshot);
 
+/*!
+  \brief Lock/unlock a session's ICE mutex so the signaling thread can serialize its
+         mutation of the media engine's ice_in/ice_out arrays against the media thread.
+         Both are NULL-safe (no-op before media is running) and the mutex is nested.
+*/
+SWITCH_DECLARE(void) switch_rtp_ice_lock(switch_rtp_t *rtp_session);
+SWITCH_DECLARE(void) switch_rtp_ice_unlock(switch_rtp_t *rtp_session);
+
 SWITCH_DECLARE(switch_byte_t) switch_rtp_check_auto_adj(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(void) switch_rtp_set_interdigit_delay(switch_rtp_t *rtp_session, uint32_t delay);
 
