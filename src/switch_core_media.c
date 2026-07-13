@@ -4017,6 +4017,15 @@ static switch_core_media_ice_type_t switch_determine_ice_type(switch_rtp_engine_
 		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG8, "Ice-Type from channel-variable 'ice_disable_dtls_protection': ice_type: %d\n", ice_type);
 	}
 
+	if (switch_channel_var_true(session->channel, "ice_nomination")) {
+		if (ice_type & ICE_CONTROLLED) {
+			ice_type |= ICE_NOMINATION;
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG8, "Ice-Type from channel-variable 'ice_nomination': ice_type: %d\n", ice_type);
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Channel-variable 'ice_nomination' ignored: nominated candidate selection applies only to controlled agents.\n");
+		}
+	}
+
 	return ice_type;
 }
 

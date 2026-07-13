@@ -2743,7 +2743,8 @@ typedef enum {
 	ICE_VANILLA = (1 << 1),
 	ICE_CONTROLLED = (1 << 2),
 	ICE_LITE = (1 << 3),
-	ICE_DISABLE_DTLS_PROTECTION = (1 << 4)
+	ICE_DISABLE_DTLS_PROTECTION = (1 << 4),
+	ICE_NOMINATION = (1 << 5)
 } switch_core_media_ice_type_t;
 
 typedef enum {
