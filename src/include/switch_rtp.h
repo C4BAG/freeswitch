@@ -107,6 +107,7 @@ typedef struct icand_s {
 	uint8_t use_candidate;
 	char acl_passed;
 	switch_time_t stun_rcv_use_last;
+	switch_time_t media_rcv_last;   /* Phase 2: micro-time of the last authenticated RTP media received from this candidate */
 } icand_t;
 
 #define MAX_CAND 50

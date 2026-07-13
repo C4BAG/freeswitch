@@ -706,6 +706,7 @@ static int switch_rtp_ice_find_candidate(switch_rtp_ice_t *ice, const char *addr
 #define STUN_TOO_LONG 20000
 #define MEDIA_TOO_LONG 2000
 #define ADJ_TOO_LONG 1000
+#define MEDIA_FRESH 1000   /* Phase 2: ms; a nominated candidate is "carrying media" if RTP arrived within this window (above the Opus DTX interval of ~400ms, so brief DTX gaps do not read as stale). Chosen keeps priority while its own media is fresh; a hand-over happens once the incumbent stops carrying fresh media OR drops out of the nominated set, and another nominated candidate has fresh media. */
 
 /* Nominated-mode is active only when the opt-in switch is set AND we are controlled;
    otherwise handle_ice falls back to the legacy (SignalWire) behavior. */
@@ -737,27 +738,24 @@ static int switch_rtp_ice_find_candidate_nominated(switch_rtp_t *rtp_session, sw
 {
 	switch_time_t now;
 	uint32_t best_priority = 0;
+	switch_time_t best_media = 0;
 	int i;
-	int idx = -1;
+	int idx = -1;            /* highest-priority nominated candidate (fallback) */
+	int media_idx = -1;      /* nominated candidate carrying the freshest media */
 	int chosen;
+	int chosen_nominated = 0;
+	int chosen_media_fresh = 0;
 
 	if (!switch_rtp_ready(rtp_session) || ice == NULL || zstr(ice->user_ice) || zstr(ice->ice_user) || (ice->type & ICE_VANILLA) == 0) return -1;
 
 	now = switch_micro_time_now();
 	chosen = ice->ice_params->chosen[ice->proto];
 
-	/* Incumbent hysteresis: if the currently chosen pair is still nominated, keep it.
-	   This prevents A/B flapping when the controlling peer aggressively nominates more
-	   than one pair. A hand-over happens only once the incumbent drops out of the
-	   nominated set (its USE-CANDIDATE window expired); then the highest-priority
-	   remaining nominated pair wins (RFC 8445 priority order). */
-	if (chosen >= 0 && chosen < ice->ice_params->cand_idx[ice->proto] &&
-		1 == switch_rtp_ice_is_candidate_nominated(rtp_session, ice, &ice->ice_params->cands[chosen][ice->proto], 1, &now, 0)) {
-		return chosen;
-	}
-
+	/* One pass over the nominated set (USE-CANDIDATE + ICE-ACL + STUN-fresh), tracking
+	   both the highest-priority candidate and the one carrying the freshest media. */
 	for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
 		const icand_t *cand = &ice->ice_params->cands[i][ice->proto];
+		int media_fresh;
 
 		if (1 != switch_rtp_ice_is_candidate_nominated(rtp_session, ice, cand, i == chosen, &now, 0)) {
 			continue;
@@ -767,9 +765,76 @@ static int switch_rtp_ice_find_candidate_nominated(switch_rtp_t *rtp_session, sw
 			best_priority = cand->priority;
 			idx = i;
 		}
+
+		media_fresh = (cand->media_rcv_last && (now - cand->media_rcv_last) / 1000 < MEDIA_FRESH);
+		if (media_fresh && (media_idx < 0 || cand->media_rcv_last > best_media)) {
+			best_media = cand->media_rcv_last;
+			media_idx = i;
+		}
+
+		if (i == chosen) {
+			chosen_nominated = 1;
+			chosen_media_fresh = media_fresh;
+		}
 	}
 
+	if (idx < 0) {
+		return -1;   /* nothing nominated */
+	}
+
+	/* Phase 2 media-driven selection (single authority: the read path only records
+	   media_rcv_last, it never switches - that keeps the write->ice lock order intact):
+	   - keep the incumbent while its own media is fresh (stable, no flapping, honors
+	     an active pair over a-priori priority);
+	   - else follow whichever nominated candidate currently carries media (the
+	     controlling peer's real path) - hand-over within ~MEDIA_FRESH once the
+	     incumbent's media goes stale;
+	   - with no media signal at all, fall back to incumbent hysteresis, then priority
+	     (identical to the pre-Phase-2 behavior during bootstrap / idle / hold). */
+	if (chosen_nominated && chosen_media_fresh) {
+		return chosen;
+	}
+	if (media_idx >= 0) {
+		return media_idx;
+	}
+	if (chosen_nominated) {
+		return chosen;
+	}
 	return idx;
+}
+
+/* Phase 2 (media-driven selection, controlled + nomination + rtcp-mux): the read path
+   only OBSERVES media - it records, per candidate, when authenticated RTP last arrived
+   from it (media_rcv_last). It deliberately does NOT switch the send target here.
+   Switching would call switch_rtp_ice_change_dest -> switch_rtp_set_remote_address, which
+   takes write_mutex while this path holds only ice_mutex, inverting the codebase-wide
+   write->ice lock order (handle_ice and switch_rtp_write_raw both take write_mutex first)
+   and dead-locking cross-thread. switch_rtp_ice_find_candidate_nominated (run from
+   handle_ice under the correct locks) decides the pair - keeping the incumbent while its
+   own media is fresh, else following the nominated candidate that carries fresh media -
+   and handle_ice performs the re-point. Caller holds rtp_session->ice_mutex. */
+static void switch_rtp_media_observe(switch_rtp_t *rtp_session, switch_time_t now)
+{
+	switch_rtp_ice_t *ice = &rtp_session->ice;
+	int i;
+
+	if (!ice_nomination_active(ice) || !rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX] || !ice->ice_params) {
+		return;
+	}
+
+	/* Common case: media from the current send target - record it without a scan. */
+	if (switch_cmp_addr(rtp_session->rtp_from_addr, ice->addr, SWITCH_FALSE)) {
+		i = ice->ice_params->chosen[ice->proto];
+	} else {
+		char host[80] = "";
+		switch_port_t port = switch_sockaddr_get_port(rtp_session->rtp_from_addr);
+		switch_get_addr(host, sizeof(host), rtp_session->rtp_from_addr);
+		i = switch_rtp_ice_find_candidate(ice, host, &port);
+	}
+
+	if (i >= 0 && i < ice->ice_params->cand_idx[ice->proto]) {
+		ice->ice_params->cands[i][ice->proto].media_rcv_last = now;
+	}
 }
 
 static handle_rfc2833_result_t handle_rfc2833(switch_rtp_t *rtp_session, switch_size_t bytes, int *do_cng)
@@ -1672,6 +1737,38 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 			if (nomination_on) {
 				nominated_idx = switch_rtp_ice_find_candidate_nominated(rtp_session, ice);
 				nomination_locked = nominated_idx >= 0;
+
+				/* Phase 2 media-driven hand-over: if the nominee differs from the current
+				   send target and is carrying fresh media, switch to it directly instead of
+				   waiting for a STUN packet from it (which would bind the hand-over latency
+				   to the peer's STUN/consent cadence). Safe: the nominee passed
+				   is_candidate_nominated (use_candidate + ICE-ACL + STUN-fresh), and we hold
+				   write->ice here (handle_ice), so change_dest -> set_remote_address keeps the
+				   codebase lock order (no read-path inversion). The last_adj gate inherits the
+				   legacy settling interval, so a transient media blip cannot flap the target. */
+				if (nominated_idx >= 0 && nominated_idx != ice->ice_params->chosen[ice->proto] &&
+					ice->ice_params->cands[nominated_idx][ice->proto].media_rcv_last &&
+					(now - ice->ice_params->cands[nominated_idx][ice->proto].media_rcv_last) / 1000 < MEDIA_FRESH &&
+					(now - rtp_session->last_adj) / 1000 > ADJ_TOO_LONG) {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_NOTICE,
+						"ICE media-driven hand-over: %s send target idx %d -> %d (%s:%d)\n", rtp_type(rtp_session),
+						ice->ice_params->chosen[ice->proto], nominated_idx,
+						ice->ice_params->cands[nominated_idx][ice->proto].con_addr,
+						ice->ice_params->cands[nominated_idx][ice->proto].con_port);
+					switch_rtp_ice_change_dest(rtp_session, ice,
+						ice->ice_params->cands[nominated_idx][ice->proto].con_addr,
+						ice->ice_params->cands[nominated_idx][ice->proto].con_port);
+					rtp_session->last_adj = now;
+					/* change_dest re-pointed ice->addr; refresh cmp so the downstream
+					   do_adj / last_ok logic does not act on the pre-switch comparison
+					   (a stale cmp would trigger a redundant second change_dest). */
+					cmp = switch_cmp_addr(from_addr, ice->addr, SWITCH_FALSE);
+					/* We just committed to a live, media-carrying pair, so consent is alive;
+					   refresh last_ok explicitly - the recomputed cmp is false when the
+					   triggering packet came from the outgoing incumbent, which would
+					   otherwise skip the cmp-gated last_ok refresh for this valid packet. */
+					ice->last_ok = now;
+				}
 			}
 
 			if ((i = switch_rtp_ice_find_candidate(ice, from_host, &from_port)) >= 0) {
@@ -5448,9 +5545,10 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_activate_ice_v2(switch_rtp_t *rtp_ses
 	if (ice_params) {
 		for (int j = 0; j < MAX_CAND_IDX_COUNT; j++)
 			for (int i = 0; i < ice_params->cand_idx[j]; i++) {
-				ice_params->cands[i][j].use_candidate = 0; 
+				ice_params->cands[i][j].use_candidate = 0;
 				ice_params->cands[i][j].responsive = 0;
 				ice_params->cands[i][j].stun_rcv_use_last = 0;
+				ice_params->cands[i][j].media_rcv_last = 0;
 				ice_params->cands[i][j].acl_passed = 0;
 			}
 	}
@@ -6808,6 +6906,17 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 					sbytes = 0;
 				} else {
 					rtp_session->srtp_errs[rtp_session->srtp_idx_rtp] = 0;
+				}
+
+				/* Phase 2: on genuinely authenticated RTP, OBSERVE the peer's media path by
+				   recording media_rcv_last for the source candidate - no send-target switch
+				   here; that decision is made later in switch_rtp_ice_find_candidate_nominated
+				   under handle_ice (self-gated to controlled+nomination+mux). Guard with the
+				   same condition as the unprotect above so stat reflects a real decode (stat
+				   keeps its 0 initializer when unprotect is skipped on SFF_PLC or no recv_ctx). */
+				if (!stat && rtp_session->has_rtp && !(*flags & SFF_PLC) && rtp_session->recv_ctx[rtp_session->srtp_idx_rtp]
+					&& ice_nomination_active(&rtp_session->ice)) {
+					switch_rtp_media_observe(rtp_session, now);
 				}
 
 				*bytes = sbytes;
