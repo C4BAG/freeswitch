@@ -9779,13 +9779,15 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_get_ice_snapshot(switch_rtp_t *rtp_se
 							&snapshot->out_count, &snapshot->out_chosen, &snapshot->out_is_chosen,
 							&snapshot->out_ufrag, &snapshot->out_pwd);
 
-	/* gen_ice() populates only ice_out.cands[0][0] and never bumps cand_idx, so
-	   the single local host candidate is gated by .ready instead of by a count.
-	   Surface that one candidate explicitly (a full outgoing candidate list and
-	   RFC 8445 candidate pairs are not maintained by the core yet). */
-	if (snapshot->out_count == 0 && ice->ice_params_out && ice->ice_params_out->cands[0][idx].ready) {
-		snapshot->out_cands[0] = ice->ice_params_out->cands[0][idx];
-		snapshot->out_count = 1;
+	/* gen_ice() marks each local host candidate with .ready (one per media family under
+	   audio dual-stack) but never bumps cand_idx, so the count-based copy above yields
+	   nothing. Surface the ready host candidates explicitly (a full outgoing candidate
+	   list and RFC 8445 candidate pairs are not maintained by the core yet). */
+	if (snapshot->out_count == 0 && ice->ice_params_out) {
+		int oc;
+		for (oc = 0; oc < MAX_CAND && ice->ice_params_out->cands[oc][idx].ready; oc++) {
+			snapshot->out_cands[snapshot->out_count++] = ice->ice_params_out->cands[oc][idx];
+		}
 	}
 
 	switch_mutex_unlock(rtp_session->ice_mutex);
