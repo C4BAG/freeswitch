@@ -331,6 +331,13 @@ struct switch_rtp {
 	switch_pollfd_t *jb_pollfd;
 
 	switch_sockaddr_t *local_addr, *rtcp_local_addr;
+	/* Media dual-stack: a second receive socket bound to the other media family at the
+	   same port (the alt host candidate advertised by gen_ice). NULL unless dual-stack is
+	   active (audio + both rtpip4/rtpip6). Runs in parallel to sock_input; the read path
+	   polls both, and the send path uses whichever bound socket matches the remote family. */
+	switch_socket_t *sock_input_2;
+	switch_pollfd_t *read_pollfd_dual;   /* contiguous 2-element pollset [sock_input, sock_input_2] */
+	switch_sockaddr_t *local_addr_2;
 	rtp_msg_t send_msg;
 	rtcp_msg_t rtcp_send_msg;
 	switch_rtcp_frame_t rtcp_frame;
@@ -3313,6 +3320,18 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_local_address(switch_rtp_t *rtp_s
 		switch_rtp_kill_socket(rtp_session);
 	}
 
+	/* Media dual-stack: the primary socket is being rebuilt, so the cached combined pollset
+	   (read_pollfd_dual) and the second-family socket now reference the OLD primary. Tear the
+	   second family down here; core_media re-enables it after re-activation. */
+	if (rtp_session->sock_input_2) {
+		if (rtp_session->sock_input_2 != rtp_session->sock_output) {
+			switch_socket_close(rtp_session->sock_input_2);
+		}
+		rtp_session->sock_input_2 = NULL;
+	}
+	rtp_session->read_pollfd_dual = NULL;
+	rtp_session->local_addr_2 = NULL;
+
 	if (switch_socket_create(&new_sock, switch_sockaddr_get_family(rtp_session->local_addr), SOCK_DGRAM, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS) {
 		*err = "Socket Error!";
 		goto done;
@@ -3433,6 +3452,126 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_local_address(switch_rtp_t *rtp_s
 		WRITE_DEC(rtp_session);
 		READ_DEC(rtp_session);
 	}
+
+	return status;
+}
+
+/* Media dual-stack: bind a second receive socket to the OTHER media family at alt_host:alt_port
+   (the alt host candidate gen_ice advertised - same port as the primary). Mirror of
+   enable_local_rtcp_socket. Additive: leaves sock_input/local_addr untouched. */
+static switch_status_t enable_dual_recv_socket(switch_rtp_t *rtp_session, const char *alt_host, switch_port_t alt_port, const char **err)
+{
+	switch_socket_t *new_sock = NULL, *old_sock = NULL;
+
+	if (zstr(alt_host) || !alt_port) {
+		*err = "Dual-stack address error";
+		return SWITCH_STATUS_FALSE;
+	}
+
+	/* Idempotent: on re-activation (re-INVITE / ICE restart) we are normally asked for the same
+	   alt address/port that is already bound. Do nothing then - this avoids re-alloc churn and,
+	   crucially, avoids closing a sock_input_2 that may currently be aliased as sock_output. */
+	if (rtp_session->sock_input_2 && rtp_session->read_pollfd_dual && rtp_session->local_addr_2) {
+		char cur[80] = "";
+		switch_get_addr(cur, sizeof(cur), rtp_session->local_addr_2);
+		if (!zstr(cur) && !strcmp(cur, alt_host) && switch_sockaddr_get_port(rtp_session->local_addr_2) == alt_port) {
+			return SWITCH_STATUS_SUCCESS;
+		}
+	}
+
+	if (switch_sockaddr_info_get(&rtp_session->local_addr_2, alt_host, SWITCH_UNSPEC, alt_port, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS) {
+		*err = "Dual-stack local address error";
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (switch_socket_create(&new_sock, switch_sockaddr_get_family(rtp_session->local_addr_2), SOCK_DGRAM, 0, rtp_session->pool) != SWITCH_STATUS_SUCCESS) {
+		*err = "Dual-stack socket error";
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (switch_socket_opt_set(new_sock, SWITCH_SO_REUSEADDR, 1) != SWITCH_STATUS_SUCCESS) {
+		switch_socket_close(new_sock);
+		*err = "Dual-stack socket opt error";
+		return SWITCH_STATUS_FALSE;
+	}
+
+	if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
+		switch_socket_opt_set(new_sock, SWITCH_SO_RCVBUF, 1572864);
+		switch_socket_opt_set(new_sock, SWITCH_SO_SNDBUF, 1572864);
+	} else {
+		switch_socket_opt_set(new_sock, SWITCH_SO_RCVBUF, 851968);
+		switch_socket_opt_set(new_sock, SWITCH_SO_SNDBUF, 851968);
+	}
+
+	if (switch_socket_bind(new_sock, rtp_session->local_addr_2) != SWITCH_STATUS_SUCCESS) {
+		switch_socket_close(new_sock);
+		*err = "Dual-stack bind error";
+		return SWITCH_STATUS_FALSE;
+	}
+
+	/* Dual-stack requires non-blocking sockets: the read path polls a combined pollset over
+	   both families and then recvfrom's them in turn WITHOUT re-polling, so a recvfrom on the
+	   idle family must return immediately. Force NONBLOCK on both and set the session flag so
+	   the blocking-restore paths (do_flush) never re-block one of them. */
+	switch_socket_opt_set(new_sock, SWITCH_SO_NONBLOCK, TRUE);
+	switch_rtp_set_flag(rtp_session, SWITCH_RTP_FLAG_NOBLOCK); /* also sets sock_input NONBLOCK */
+
+	old_sock = rtp_session->sock_input_2;
+	rtp_session->sock_input_2 = new_sock;
+	new_sock = NULL;
+
+	/* Build the combined read pollset: one contiguous 2-element array [sock_input, sock_input_2]
+	   so every switch_poll(read_pollfd_dual, 2, ...) site wakes on EITHER family. The descriptor
+	   fields are filled by switch_socket_create_pollfd and copied into the array. */
+	{
+		switch_pollfd_t *pfd0 = NULL, *pfd1 = NULL, *arr;
+
+		if (switch_socket_create_pollfd(&pfd0, rtp_session->sock_input, SWITCH_POLLIN | SWITCH_POLLERR, rtp_session->sock_input, rtp_session->pool) == SWITCH_STATUS_SUCCESS &&
+			switch_socket_create_pollfd(&pfd1, rtp_session->sock_input_2, SWITCH_POLLIN | SWITCH_POLLERR, rtp_session->sock_input_2, rtp_session->pool) == SWITCH_STATUS_SUCCESS) {
+			arr = switch_core_alloc(rtp_session->pool, sizeof(switch_pollfd_t) * 2);
+			arr[0] = *pfd0;
+			arr[1] = *pfd1;
+			rtp_session->read_pollfd_dual = arr;
+		} else {
+			*err = "Dual-stack pollset error";
+			switch_socket_close(rtp_session->sock_input_2);
+			rtp_session->sock_input_2 = NULL;
+			rtp_session->read_pollfd_dual = NULL;   /* fall back to single-family, no stale array */
+			if (old_sock && old_sock != rtp_session->sock_output) {
+				switch_socket_close(old_sock);      /* don't leak the previous second-family socket */
+			}
+			return SWITCH_STATUS_FALSE;
+		}
+	}
+
+	/* Guard: on a genuine rebuild (alt address changed) the previous socket may still be aliased
+	   as sock_output - closing it would dangle the send path. Teardown/set_remote_address handle
+	   that alias; leave it be here. */
+	if (old_sock && old_sock != rtp_session->sock_output) {
+		switch_socket_close(old_sock);
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+SWITCH_DECLARE(switch_status_t) switch_rtp_enable_dual_recv(switch_rtp_t *rtp_session, const char *alt_host, switch_port_t alt_port, const char **err)
+{
+	switch_status_t status;
+
+	*err = NULL;
+
+	if (!switch_rtp_ready(rtp_session)) {
+		*err = "RTP not ready";
+		return SWITCH_STATUS_FALSE;
+	}
+
+	READ_INC(rtp_session);
+	WRITE_INC(rtp_session);
+
+	status = enable_dual_recv_socket(rtp_session, alt_host, alt_port, err);
+
+	WRITE_DEC(rtp_session);
+	READ_DEC(rtp_session);
 
 	return status;
 }
@@ -3638,8 +3777,14 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_remote_address(switch_rtp_t *rtp_
 
 	if (rtp_session->sock_input && switch_sockaddr_get_family(rtp_session->remote_addr) == switch_sockaddr_get_family(rtp_session->local_addr)) {
 		rtp_session->sock_output = rtp_session->sock_input;
+	} else if (rtp_session->sock_input_2 && rtp_session->local_addr_2 &&
+			   switch_sockaddr_get_family(rtp_session->remote_addr) == switch_sockaddr_get_family(rtp_session->local_addr_2)) {
+		/* Media dual-stack: the peer selected our second-family candidate. Send from that
+		   bound receive socket so the source address matches the advertised candidate
+		   (symmetric RTP/ICE), instead of an unbound ephemeral-port socket. */
+		rtp_session->sock_output = rtp_session->sock_input_2;
 	} else {
-		if (rtp_session->sock_output && rtp_session->sock_output != rtp_session->sock_input) {
+		if (rtp_session->sock_output && rtp_session->sock_output != rtp_session->sock_input && rtp_session->sock_output != rtp_session->sock_input_2) {
 			switch_socket_close(rtp_session->sock_output);
 		}
 		if ((status = switch_socket_create(&rtp_session->sock_output,
@@ -5713,6 +5858,10 @@ SWITCH_DECLARE(void) switch_rtp_kill_socket(switch_rtp_t *rtp_session)
 			switch_socket_shutdown(rtp_session->sock_output, SWITCH_SHUTDOWN_READWRITE);
 		}
 
+		if (rtp_session->sock_input_2 && rtp_session->sock_input_2 != rtp_session->sock_input && rtp_session->sock_input_2 != rtp_session->sock_output) {
+			switch_socket_shutdown(rtp_session->sock_input_2, SWITCH_SHUTDOWN_READWRITE);
+		}
+
 		if (rtp_session->flags[SWITCH_RTP_FLAG_ENABLE_RTCP]) {
 			if (rtp_session->sock_input && rtp_session->rtcp_sock_input && rtp_session->rtcp_sock_input != rtp_session->sock_input) {
 				ping_socket(rtp_session);
@@ -5850,6 +5999,15 @@ SWITCH_DECLARE(void) switch_rtp_destroy(switch_rtp_t **rtp_session)
 		sock = (*rtp_session)->sock_output;
 		(*rtp_session)->sock_output = NULL;
 		switch_socket_close(sock);
+	}
+
+	if ((*rtp_session)->sock_input_2) {
+		switch_socket_t *sock2 = (*rtp_session)->sock_input_2;
+		(*rtp_session)->sock_input_2 = NULL;
+		/* may have been reused as sock_output (alt family selected) and already closed above */
+		if (sock2 != sock) {
+			switch_socket_close(sock2);
+		}
 	}
 
 	if ((sock = (*rtp_session)->rtcp_sock_input)) {
@@ -6026,7 +6184,9 @@ SWITCH_DECLARE(void) switch_rtp_clear_flag(switch_rtp_t *rtp_session, switch_rtp
 		rtp_session->stats.inbound.last_processed_seq = 0;
 	} else if (flag == SWITCH_RTP_FLAG_PAUSE) {
 		reset_jitter_seq(rtp_session);
-	} else if (flag == SWITCH_RTP_FLAG_NOBLOCK && rtp_session->sock_input) {
+	} else if (flag == SWITCH_RTP_FLAG_NOBLOCK && rtp_session->sock_input && !rtp_session->read_pollfd_dual) {
+		/* Media dual-stack keeps its receive sockets non-blocking (the combined-pollset read path
+		   recvfrom's the idle family without re-polling); do not revert to blocking while active. */
 		switch_socket_opt_set(rtp_session->sock_input, SWITCH_SO_NONBLOCK, FALSE);
 	}
 }
@@ -6334,6 +6494,12 @@ static switch_size_t do_flush(switch_rtp_t *rtp_session, int force, switch_size_
 				bytes = sizeof(rtp_msg_t);
 				switch_socket_recvfrom(rtp_session->from_addr, rtp_session->sock_input, 0, (void *) &rtp_session->recv_msg, &bytes);
 
+				if (rtp_session->sock_input_2 && bytes == 0) {
+					/* dual-stack: also drain the second family so a flush empties both */
+					bytes = sizeof(rtp_msg_t);
+					switch_socket_recvfrom(rtp_session->from_addr, rtp_session->sock_input_2, 0, (void *) &rtp_session->recv_msg, &bytes);
+				}
+
 				if (bytes) {
 					int do_cng = 0;
 
@@ -6434,6 +6600,30 @@ static int get_recv_payload(switch_rtp_t *rtp_session)
 
 #define return_cng_frame() do_cng = 1; goto timer_check
 
+/* Media dual-stack input poll: when the second-family socket is active, poll BOTH families
+   at once via the combined 2-element pollset, so every read/flush/drain site wakes on either.
+   Returns SUCCESS if either family has data. With no second socket this is the plain single
+   poll (behavior identical to before). */
+static switch_status_t rtp_poll_input(switch_rtp_t *rtp_session, int ms)
+{
+	int fdr = 0;
+
+	if (rtp_session->read_pollfd_dual) {
+		switch_status_t st = switch_poll(rtp_session->read_pollfd_dual, 2, &fdr, ms);
+
+		/* switch_poll() only maps POLLERR/POLLHUP/POLLNVAL -> GENERR for numsock==1; replicate it
+		   for the 2-element set so a broken socket still drives teardown instead of a CPU busy-loop. */
+		if ((rtp_session->read_pollfd_dual[0].rtnevents & (SWITCH_POLLERR | SWITCH_POLLHUP | SWITCH_POLLNVAL)) ||
+			(rtp_session->read_pollfd_dual[1].rtnevents & (SWITCH_POLLERR | SWITCH_POLLHUP | SWITCH_POLLNVAL))) {
+			return SWITCH_STATUS_GENERR;
+		}
+
+		return st;
+	}
+
+	return switch_poll(rtp_session->read_pollfd, 1, &fdr, ms);
+}
+
 static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t *bytes, switch_frame_flag_t *flags,
 									   payload_map_t **pmapP, switch_status_t poll_status, switch_bool_t return_jb_packet)
 {
@@ -6463,7 +6653,6 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 
 	if (block) {
 		int to = 20000;
-		int fdr = 0;
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO]) {
 			to = 100000;
@@ -6473,7 +6662,7 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 			}
 		}
 
-		poll_status = switch_poll(rtp_session->read_pollfd, 1, &fdr, to);
+		poll_status = rtp_poll_input(rtp_session, to);
 
 		if (rtp_session->flags[SWITCH_RTP_FLAG_USE_TIMER] && rtp_session->timer.interval) {
 			switch_core_timer_sync(&rtp_session->timer);
@@ -6505,6 +6694,13 @@ static switch_status_t read_rtp_packet(switch_rtp_t *rtp_session, switch_size_t 
 
 	if (poll_status == SWITCH_STATUS_SUCCESS) {
 		status = switch_socket_recvfrom(rtp_session->from_addr, rtp_session->sock_input, 0, (void *) &rtp_session->recv_msg, bytes);
+
+		if (rtp_session->sock_input_2 && (status != SWITCH_STATUS_SUCCESS || *bytes == 0)) {
+			/* Media dual-stack: this wake-up was for the second family (sockets are
+			   non-blocking in dual mode); read it so from_addr reflects its source. */
+			*bytes = sizeof(rtp_msg_t);
+			status = switch_socket_recvfrom(rtp_session->from_addr, rtp_session->sock_input_2, 0, (void *) &rtp_session->recv_msg, bytes);
+		}
 	} else {
 		*bytes = 0;
 	}
@@ -7788,7 +7984,6 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 	int sleep_mss = 1000;
 	int poll_sec = 5;
 	int poll_loop = 0;
-	int fdr = 0;
 	int rtcp_fdr = 0;
 	int hot_socket = 0;
 	int read_loops = 0;
@@ -7826,7 +8021,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 			rtp_session->read_pollfd) {
 
 			if (rtp_session->jb && !rtp_session->pause_jb && jb_valid(rtp_session)) {
-				while (switch_poll(rtp_session->read_pollfd, 1, &fdr, 0) == SWITCH_STATUS_SUCCESS) {
+				while (rtp_poll_input(rtp_session, 0) == SWITCH_STATUS_SUCCESS) {
 					status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, SWITCH_STATUS_SUCCESS, SWITCH_FALSE);
 
 					if (status == SWITCH_STATUS_GENERR) {
@@ -7849,7 +8044,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 
 			} else if ((rtp_session->flags[SWITCH_RTP_FLAG_AUTOFLUSH] || rtp_session->flags[SWITCH_RTP_FLAG_STICKY_FLUSH])) {
 
-				if (switch_poll(rtp_session->read_pollfd, 1, &fdr, 0) == SWITCH_STATUS_SUCCESS) {
+				if (rtp_poll_input(rtp_session, 0) == SWITCH_STATUS_SUCCESS) {
 					status = read_rtp_packet(rtp_session, &bytes, flags, pmapP, SWITCH_STATUS_SUCCESS, SWITCH_FALSE);
 					if (status == SWITCH_STATUS_GENERR) {
 						ret = -1;
@@ -7868,7 +8063,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 					}
 
 					if (bytes) {
-						if (switch_poll(rtp_session->read_pollfd, 1, &fdr, 0) == SWITCH_STATUS_SUCCESS) {
+						if (rtp_poll_input(rtp_session, 0) == SWITCH_STATUS_SUCCESS) {
 							rtp_session->hot_hits++;//+= rtp_session->samples_per_interval;
 
 							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG10, "%s Hot Hit %d\n",
@@ -7978,7 +8173,7 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 				pt = 0;
 			}
 
-			poll_status = switch_poll(rtp_session->read_pollfd, 1, &fdr, pt);
+			poll_status = rtp_poll_input(rtp_session, pt);
 
 			if (rtp_session->flags[SWITCH_RTP_FLAG_VIDEO] && poll_status != SWITCH_STATUS_SUCCESS && rtp_session->media_timeout && rtp_session->last_media) {
 				check_timeout(rtp_session);

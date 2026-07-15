@@ -350,6 +350,16 @@ SWITCH_DECLARE(void) switch_rtp_reset(switch_rtp_t *rtp_session);
 SWITCH_DECLARE(switch_status_t) switch_rtp_set_local_address(switch_rtp_t *rtp_session, const char *host, switch_port_t port, const char **err);
 
 /*!
+  \brief Bind a second RTP receive socket for media dual-stack (the other address family, same port)
+  \param rtp_session the RTP session
+  \param alt_host the alternate-family local IP (the family sock_input is NOT bound to)
+  \param alt_port the local port (same as the primary socket)
+  \param err a pointer to set an error string on failure
+  \return SWITCH_STATUS_SUCCESS on success
+*/
+SWITCH_DECLARE(switch_status_t) switch_rtp_enable_dual_recv(switch_rtp_t *rtp_session, const char *alt_host, switch_port_t alt_port, const char **err);
+
+/*!
   \brief Kill the socket on an existing RTP session
   \param rtp_session an RTP session to kill the socket of
 */

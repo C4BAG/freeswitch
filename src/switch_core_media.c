@@ -9077,6 +9077,23 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_activate_rtp(switch_core_sessi
 #endif
 									);
 
+				/* Media dual-stack: we advertised a second-family host candidate above
+				   (gen_ice, audio only); bind a receive socket for it (same port, other family)
+				   so a dual-stack peer can actually use it. Inside the ICE-active guard so it
+				   is genuinely tied to the candidate advertisement. */
+				if (!zstr(smh->mparams->rtpip4) && !zstr(smh->mparams->rtpip6) && !zstr(a_engine->local_sdp_ip)) {
+					const char *alt_ip = strchr(a_engine->local_sdp_ip, ':') ? smh->mparams->rtpip4 : smh->mparams->rtpip6;
+
+					if (!zstr(alt_ip) && strcmp(alt_ip, a_engine->local_sdp_ip)) {
+						const char *derr = NULL;
+						if (switch_rtp_enable_dual_recv(a_engine->rtp_session, alt_ip, a_engine->local_sdp_port, &derr) == SWITCH_STATUS_SUCCESS) {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, "Media dual-stack: also receiving on %s:%d\n", alt_ip, a_engine->local_sdp_port);
+						} else {
+							switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "Media dual-stack: second-family receive socket not enabled: %s\n", derr ? derr : "unknown");
+						}
+					}
+				}
+
 
 
 		}
