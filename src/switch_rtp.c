@@ -338,6 +338,7 @@ struct switch_rtp {
 	switch_socket_t *sock_input_2;
 	switch_pollfd_t *read_pollfd_dual;   /* contiguous 2-element pollset [sock_input, sock_input_2] */
 	switch_sockaddr_t *local_addr_2;
+	dtls_state_t cng_log_state;   /* last DTLS state logged for the CNG-during-handshake notice; de-spams the per-frame log */
 	rtp_msg_t send_msg;
 	rtcp_msg_t rtcp_send_msg;
 	switch_rtcp_frame_t rtcp_frame;
@@ -8343,9 +8344,15 @@ static int rtp_common_read(switch_rtp_t *rtp_session, switch_payload_t *payload_
 				if (dtls_handshaking &&
 					(!(io_flags & SWITCH_IO_FLAG_NOBLOCK)) &&
 					(rtp_session->dtmf_data.out_digit_dur == 0)) {
-					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
-						"C4B patch: returning CNG frame during DTLS handshake (dtls_state=%d, got_rtp_poll=%d)\n",
-						dtls_state_snap, got_rtp_poll);
+					/* Log only when the DTLS state actually changes, not on every read cycle: a
+					   stalled handshake would otherwise flood the log with thousands of identical
+					   lines (the state transitions themselves are logged separately by dtls_set_state). */
+					if (dtls_state_snap != rtp_session->cng_log_state) {
+						switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG,
+							"C4B patch: returning CNG frame during DTLS handshake (dtls_state=%d, got_rtp_poll=%d)\n",
+							dtls_state_snap, got_rtp_poll);
+						rtp_session->cng_log_state = dtls_state_snap;
+					}
 					return_cng_frame();
 				}
 			}
