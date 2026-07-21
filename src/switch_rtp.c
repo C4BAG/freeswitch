@@ -1231,6 +1231,25 @@ int icecmp(const char *them, switch_rtp_ice_t *ice)
 	return strcmp(them, ice->luser_ice);
 }
 
+/* Media dual-stack: pick the send socket whose bound family matches addr, so STUN replies
+   and media egress use the receive socket bound to the advertised candidate (symmetric
+   RTP/ICE path) instead of a wrong-family or unbound socket. Returns sock_input for the
+   primary family, sock_input_2 for the second family, or NULL when neither matches (the
+   caller keeps its own fallback). In single-stack sock_input_2/local_addr_2 are NULL, so
+   only the primary-family branch can hit. */
+static switch_socket_t *dual_recv_output_sock(switch_rtp_t *rtp_session, switch_sockaddr_t *addr)
+{
+	if (rtp_session->sock_input && rtp_session->local_addr &&
+		switch_sockaddr_get_family(addr) == switch_sockaddr_get_family(rtp_session->local_addr)) {
+		return rtp_session->sock_input;
+	}
+	if (rtp_session->sock_input_2 && rtp_session->local_addr_2 &&
+		switch_sockaddr_get_family(addr) == switch_sockaddr_get_family(rtp_session->local_addr_2)) {
+		return rtp_session->sock_input_2;
+	}
+	return NULL;
+}
+
 static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *data, switch_size_t len)
 {
 	switch_stun_packet_t *packet;
@@ -1680,6 +1699,30 @@ static void handle_ice(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice, void *d
 
 			if (is_rtcp) {
 				sock_output = rtp_session->rtcp_sock_output;
+			}
+
+			/* Media dual-stack: answer STUN on the socket whose family matches the request
+			   source, not the fixed media sock_output. In dual-recv a connectivity check can
+			   arrive on either family (both sockets are polled); the media sock_output is bound
+			   to the SELECTED family only, so replying through it drops every response to a
+			   check that arrived on the other family - e.g. the role-conflict 487 for a
+			   v4-arriving check while the selected family is v6 - and the peer never learns to
+			   switch roles. Only when the 2nd receive socket is active; single-stack keeps the
+			   previous sock_output unchanged. from_addr->family is trustworthy here thanks to
+			   the win32 recvfrom vars_set fix; if it still matched neither local family we keep
+			   the default socket (no worse than before) and say so in the log. */
+			if (!is_rtcp && rtp_session->sock_input_2 && rtp_session->local_addr_2) {
+				switch_socket_t *fam_sock = dual_recv_output_sock(rtp_session, from_addr);
+				if (fam_sock) {
+					sock_output = fam_sock;
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8,
+						"%s STUN reply to %s routed on family-matched socket (dual-stack)\n",
+						rtp_type(rtp_session), switch_get_addr(ipbuf, sizeof(ipbuf), from_addr));
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG8,
+						"%s STUN reply to %s: source family matched no local family, using default socket (dual-stack)\n",
+						rtp_type(rtp_session), switch_get_addr(ipbuf, sizeof(ipbuf), from_addr));
+				}
 			}
 
 			if (!ice->ready) {
@@ -3775,23 +3818,26 @@ SWITCH_DECLARE(switch_status_t) switch_rtp_set_remote_address(switch_rtp_t *rtp_
 	rtp_session->eff_remote_host_str = switch_core_strdup(rtp_session->pool, host);
 	rtp_session->eff_remote_port = port;
 
-	if (rtp_session->sock_input && switch_sockaddr_get_family(rtp_session->remote_addr) == switch_sockaddr_get_family(rtp_session->local_addr)) {
-		rtp_session->sock_output = rtp_session->sock_input;
-	} else if (rtp_session->sock_input_2 && rtp_session->local_addr_2 &&
-			   switch_sockaddr_get_family(rtp_session->remote_addr) == switch_sockaddr_get_family(rtp_session->local_addr_2)) {
-		/* Media dual-stack: the peer selected our second-family candidate. Send from that
-		   bound receive socket so the source address matches the advertised candidate
-		   (symmetric RTP/ICE), instead of an unbound ephemeral-port socket. */
-		rtp_session->sock_output = rtp_session->sock_input_2;
-	} else {
-		if (rtp_session->sock_output && rtp_session->sock_output != rtp_session->sock_input && rtp_session->sock_output != rtp_session->sock_input_2) {
-			switch_socket_close(rtp_session->sock_output);
-		}
-		if ((status = switch_socket_create(&rtp_session->sock_output,
-										   switch_sockaddr_get_family(rtp_session->remote_addr),
-										   SOCK_DGRAM, 0, rtp_session->pool)) != SWITCH_STATUS_SUCCESS) {
+	{
+		/* Send from the receive socket bound to the remote's family so the source address
+		   matches the advertised candidate (symmetric RTP/ICE), instead of an unbound
+		   ephemeral-port socket. Covers single-stack (primary family) and dual-stack (the peer
+		   selected our second-family candidate); shared with the STUN-reply path via
+		   dual_recv_output_sock(). Only when neither bound family matches do we create a new
+		   output socket for the remote family (legacy fallback). */
+		switch_socket_t *fam_sock = dual_recv_output_sock(rtp_session, rtp_session->remote_addr);
+		if (fam_sock) {
+			rtp_session->sock_output = fam_sock;
+		} else {
+			if (rtp_session->sock_output && rtp_session->sock_output != rtp_session->sock_input && rtp_session->sock_output != rtp_session->sock_input_2) {
+				switch_socket_close(rtp_session->sock_output);
+			}
+			if ((status = switch_socket_create(&rtp_session->sock_output,
+											   switch_sockaddr_get_family(rtp_session->remote_addr),
+											   SOCK_DGRAM, 0, rtp_session->pool)) != SWITCH_STATUS_SUCCESS) {
 
-			*err = "Socket Error!";
+				*err = "Socket Error!";
+			}
 		}
 	}
 
