@@ -4046,21 +4046,34 @@ static void free_dtls(switch_dtls_t **dtlsp)
 	}
 }
 
-/* Optimized DTLS-over-ICE peer binding: non-zero if the current packet source
-   (rtp_session->from_addr) matches any ICE candidate that has proven responsive
-   (answered a connectivity check with the negotiated ICE credentials). DTLS stays
-   on the connection it started on while ICE keeps re-optimizing the selected pair,
-   so binding to the single current ice->addr would drop in-flight DTLS on every
-   ICE switch; accepting any responsive candidate keeps the handshake alive without
-   accepting off-path (non-validated) sources. Callers hold rtp_session->ice_mutex. */
-static int dtls_from_responsive_ice_cand(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice)
+/* DTLS-over-ICE peer binding: returns the ice_params candidate index whose address matches the
+   current DTLS packet source (rtp_session->from_addr) AND counts as a bound peer path, else -1.
+   DTLS stays on the connection it started on while ICE keeps re-optimizing the selected pair, so
+   binding to the single current ice->addr would drop in-flight DTLS on every ICE switch; accepting
+   any bound candidate keeps the handshake alive.
+
+   Bound = 'responsive' (the candidate answered a Binding Response from its address) OR peer-
+   nominated via switch_rtp_ice_is_candidate_nominated (role-dependent: when FS is CONTROLLED that
+   means the candidate carries a fresh USE-CANDIDATE; when FS is CONTROLLING it reduces to
+   'responsive', so this only widens acceptance in the controlled case). The controlled/USE-CANDIDATE
+   arm is what covers dual-stack: FS probes only the one chosen candidate (ice_out sends to ice->addr),
+   so the family the peer actually uses may never become 'responsive' on its own.
+
+   NOTE on the trust level: this is NOT cryptographic. FreeSWITCH does not verify inbound
+   MESSAGE-INTEGRITY, and 'responsive' is set for any Binding Response from the candidate 5-tuple
+   without checking the transaction id (handle_ice forces ok=1 for responses); use_candidate is set
+   the same way from a Binding request. So both signals mean the same thing - a packet arrived from a
+   known candidate address that passed the IP-ACL. Widening from responsive-only to also-nominated
+   therefore does NOT lower the bar: an off-path sender able to forge one could already forge the
+   other. The barrier here is the IP-ACL + 5-tuple match, not ICE credentials. Callers hold ice_mutex. */
+static int dtls_validated_ice_cand_idx(switch_rtp_t *rtp_session, switch_rtp_ice_t *ice)
 {
 	char host[80] = "";
 	switch_port_t port;
 	int i;
 
 	if (!ice->ice_params) {
-		return 0;
+		return -1;
 	}
 
 	switch_get_addr(host, sizeof(host), rtp_session->from_addr);
@@ -4068,12 +4081,24 @@ static int dtls_from_responsive_ice_cand(switch_rtp_t *rtp_session, switch_rtp_i
 
 	for (i = 0; i < ice->ice_params->cand_idx[ice->proto]; i++) {
 		icand_t *cand = &ice->ice_params->cands[i][ice->proto];
-		if (cand->responsive && cand->con_addr && !strcmp(host, cand->con_addr) && port == cand->con_port) {
-			return 1;
+
+		if (!cand->con_addr || strcmp(host, cand->con_addr) || port != cand->con_port) {
+			continue;
+		}
+		if (cand->responsive) {
+			return i;
+		}
+		/* Peer-nominated (not yet responsive) is accepted ONLY under the ice_nomination opt-in.
+		   Without it every controlled call keeps the legacy responsive-only gate, so this does not
+		   widen DTLS acceptance for non-nomination sessions. is_candidate_nominated is itself role-
+		   gated (controlled -> use_candidate, controlling -> responsive). */
+		if (ice_nomination_active(ice) &&
+			1 == switch_rtp_ice_is_candidate_nominated(rtp_session, ice, cand, i == ice->ice_params->chosen[ice->proto], NULL, 0)) {
+			return i;
 		}
 	}
 
-	return 0;
+	return -1;
 }
 
 static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
@@ -4110,13 +4135,35 @@ static int do_dtls(switch_rtp_t *rtp_session, switch_dtls_t *dtls)
 	   dtls->remote_addr (the SDP/ICE address), never to the packet source. Leave it
 	   unset in production. RFC 8445 section 12. */
 	if (is_ice && !(rtp_session->ice.type & ICE_DISABLE_DTLS_PROTECTION)) {
-		if (!(rtp_session->ice.type & ICE_LITE) && !dtls_from_responsive_ice_cand(rtp_session, &rtp_session->ice)) {
-			char tmp_buf1[80] = "";
-			const char *host_from = switch_get_addr(tmp_buf1, sizeof(tmp_buf1), rtp_session->from_addr);
+		if (!(rtp_session->ice.type & ICE_LITE)) {
+			int cidx = dtls_validated_ice_cand_idx(rtp_session, &rtp_session->ice);
 
-			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Got DTLS packet from [%s] which is not a responsive ICE candidate. Ignored.\n", host_from);
+			if (cidx < 0) {
+				char tmp_buf1[80] = "";
+				const char *host_from = switch_get_addr(tmp_buf1, sizeof(tmp_buf1), rtp_session->from_addr);
 
-			return 0;
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(rtp_session->session), SWITCH_LOG_DEBUG5, "Got DTLS packet from [%s] which is not a validated ICE candidate. Ignored.\n", host_from);
+
+				return 0;
+			}
+
+			/* An actual DTLS record from this validated candidate (dtls->bytes > 0, not a
+			   bytes==0 pump for a non-DTLS packet whose from_addr would otherwise be recorded
+			   here) is liveness on the pair the peer really uses for the handshake. Record it
+			   (record only, no switch here - the media-driven hand-over in handle_ice performs
+			   the re-point under the correct locks) so the send target converges onto that
+			   family. FS is the DTLS server and its ServerHello leaves via dtls->sock_output =
+			   the chosen pair, so on a dual-stack peer that picked the non-selected family this
+			   is what moves chosen there and lets the handshake finish.
+
+			   Gated exactly like the other media_rcv_last recorder (switch_rtp_media_observe):
+			   only under ice_nomination + rtcp-mux, which is the sole configuration whose
+			   hand-over consumes media_rcv_last. This also confines the write to the muxed
+			   single-DTLS-channel case, so it is never driven by an RTCP-channel DTLS record
+			   (do_dtls(rtcp_dtls)) whose source is in rtcp_from_addr, not rtp_session->from_addr. */
+			if (dtls->bytes > 0 && ice_nomination_active(&rtp_session->ice) && rtp_session->flags[SWITCH_RTP_FLAG_RTCP_MUX]) {
+				rtp_session->ice.ice_params->cands[cidx][rtp_session->ice.proto].media_rcv_last = switch_micro_time_now();
+			}
 		}
 	}
 	
