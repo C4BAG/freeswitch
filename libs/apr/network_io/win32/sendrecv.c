@@ -204,6 +204,15 @@ APR_DECLARE(fspr_status_t) fspr_socket_recvfrom(fspr_sockaddr_t *from,
         (*len) = 0;
         return fspr_get_netos_error();
     }
+
+    /* Re-sync the descriptor fields (family/salen/ipaddr_ptr/ipaddr_len) from the
+       datagram just received, matching the unix path (unix/sendrecv.c). recvfrom()
+       fills from->sa including the family field, but not the higher-level fspr_sockaddr_t
+       descriptor. Without this from->family etc. keep their previous value, so
+       switch_get_addr() and sendto() misinterpret the source address when a single
+       from is reused across two socket families (dual-stack RTP receive). */
+    fspr_sockaddr_vars_set(from, from->sa.sin.sin_family, ntohs(from->sa.sin.sin_port));
+
     (*len) = rv;
     if (rv == 0 && sock->type == SOCK_STREAM)
         return APR_EOF;
