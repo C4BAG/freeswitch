@@ -9994,23 +9994,24 @@ static void emit_ice_cand_lines(char *buf, size_t buflen, switch_media_handle_t 
 	ext_v6 = (!zstr(smh->mparams->extsipip) && strchr(smh->mparams->extsipip, ':')) ? 1 : 0;
 	lsrflx_v6 = (!zstr(engine->local_sdp_ip) && strchr(engine->local_sdp_ip, ':')) ? 1 : 0;
 
-	/* Dual-stack is active only when BOTH media families are configured. When it is NOT,
-	   every family term below drops out, so the emitted candidate is byte-identical to the
-	   pre-feature single-family baseline (v4-only or v6-only): no priority decrement, and
-	   the reflexive/external gates fall back to their original family-agnostic form. Under
-	   dual-stack: RFC 8421 / RFC 6724 prefer IPv6 (the v4 host is stepped down one local-
-	   preference unit; RFC 8445 5.1.2.2 also requires same-type candidates to differ), and
-	   a reflexive candidate is attached only to the host of its own family (extsipip /
-	   local_sdp_ip), so a v4 srflx is never stapled onto a v6 host. FS cannot yet RECEIVE
-	   on the second family (dual receive is a later step); a peer preferring the v6 pair
-	   just fails that check and falls back, so this affects ordering, not reachability. */
+	/* Priority decrement is dual-stack only: RFC 8421 / RFC 6724 prefer IPv6, so under dual-stack
+	   the v4 host is stepped down one local-preference unit (RFC 8445 5.1.2.2 also requires
+	   same-type candidates to differ). In single-stack there is nothing to order, so no decrement
+	   and the host line stays byte-identical to the pre-feature single-family baseline.
+
+	   The reflexive/external family match applies ALWAYS (single- and dual-stack): a reflexive
+	   candidate is tied to a per-family public IP (extsipip / local_sdp_ip) and is attached only
+	   to the host of its own family, so a v4 srflx is never stapled onto a v6 host (or vice versa).
+	   For the common v4-only config (v4 extsipip) this stays byte-identical (families match); it
+	   also fixes a v6-only config with a v4 extsipip, which previously emitted a nonsensical
+	   v4-srflx-with-v6-raddr candidate. */
 	dual = !zstr(smh->mparams->rtpip4) && !zstr(smh->mparams->rtpip6);
 	fam_prio_dec = dual ? ice_family_prio_dec(cand_v6, family_priority) : 0;
 
-	emit_external = include_external && !zstr(smh->mparams->extsipip) && (!dual || ext_v6 == cand_v6);
+	emit_external = include_external && !zstr(smh->mparams->extsipip) && (ext_v6 == cand_v6);
 	external_srflx_dup = emit_external && external_candidate_srflx && !strcmp(smh->mparams->extsipip, cand->con_addr);
 	emit_local_srflx = !zstr(engine->local_sdp_ip) && strcmp(engine->local_sdp_ip, cand->con_addr)
-					   && engine->local_sdp_port != cand->con_port && (!dual || lsrflx_v6 == cand_v6);
+					   && engine->local_sdp_port != cand->con_port && (lsrflx_v6 == cand_v6);
 
 	switch_snprintf(buf + strlen(buf), buflen - strlen(buf), "a=candidate:%s 1 %s %u %s %d typ host generation 0\r\n",
 					tmp1, cand->transport, calc_candidate_priority_host(1, external_candidate_priority) - fam_prio_dec,
