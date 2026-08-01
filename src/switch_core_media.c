@@ -157,6 +157,11 @@ struct switch_rtp_engine_s {
 	char *cand_acl[SWITCH_MAX_CAND_ACL];
 	int cand_acl_count;
 
+	/* Reserved UDP socket backing a synthetic trickle-ICE fake candidate (blackhole). Bound but
+	   never serviced: absorbs our own checks (no STUN reply, so the fake pair never validates) and
+	   stays bound (no ICMP port-unreachable on self-sends). Lives on the session pool. */
+	switch_socket_t *trickle_blackhole_sock;
+
 	ice_t ice_in;
 	ice_t ice_out;
 
@@ -4088,6 +4093,121 @@ static void ice_sort_candidates(switch_media_handle_t *smh, switch_media_type_t 
 	}
 }
 
+/* Reserve a blackhole UDP port for a synthetic trickle-ICE fake candidate. A socket is bound to
+   the given local media IP on an ephemeral port (port 0 -> OS picks a free port outside the RTP
+   range, so no collision with real media) and kept bound but unserviced for the session lifetime:
+   nothing reads it, so a check sent to it gets no STUN reply and the fake pair never validates;
+   staying bound means a same-host check raises no ICMP port-unreachable (which on Windows would
+   disturb the media socket recv). Returns the reserved port, or 0 on failure.
+   Note: the create/bind syscalls run while check_ice holds the ICE lock. Accepted: this is the
+   rare trickle path and the calls are fast (numeric IP, local bind), so the critical section is
+   extended only by microseconds. */
+static switch_port_t reserve_trickle_blackhole(switch_media_handle_t *smh, switch_rtp_engine_t *engine, const char *ip)
+{
+	switch_sockaddr_t *bh_addr = NULL, *bound = NULL;
+	switch_socket_t *sock = NULL;
+	switch_memory_pool_t *pool = switch_core_session_get_pool(smh->session);
+
+	if (switch_sockaddr_info_get(&bh_addr, ip, SWITCH_UNSPEC, 0, 0, pool) != SWITCH_STATUS_SUCCESS || !bh_addr) {
+		return 0;
+	}
+	if (switch_socket_create(&sock, switch_sockaddr_get_family(bh_addr), SOCK_DGRAM, 0, pool) != SWITCH_STATUS_SUCCESS) {
+		return 0;
+	}
+	switch_socket_opt_set(sock, SWITCH_SO_REUSEADDR, 1);
+	if (switch_socket_bind(sock, bh_addr) != SWITCH_STATUS_SUCCESS) {
+		switch_socket_close(sock);
+		return 0;
+	}
+	if (switch_socket_addr_get(&bound, SWITCH_FALSE, sock) != SWITCH_STATUS_SUCCESS || !bound) {
+		switch_socket_close(sock);
+		return 0;
+	}
+
+	if (engine->trickle_blackhole_sock) {
+		/* re-INVITE / re-injection: release the previous reservation instead of orphaning its fd */
+		switch_socket_close(engine->trickle_blackhole_sock);
+	}
+	engine->trickle_blackhole_sock = sock; /* hold open; closed on re-injection or with the session pool */
+	return switch_sockaddr_get_port(bound);
+}
+
+/* Trickle ICE (RFC 8838): when a peer offers ICE with a=ice-options:trickle but no candidate yet,
+   inject ONE synthetic candidate so the normal ICE path (choosing loop, ACL, activation) runs with
+   a valid target instead of failing. The candidate points at our own media IP + a reserved blackhole
+   port, so it is ACL-valid but inert (never validates). The real peer is learned as a peer-reflexive
+   from its incoming binding requests and, having a higher priority, wins the nomination. Returns 1
+   if a candidate was injected, 0 otherwise. */
+static int inject_trickle_fake_candidate(switch_media_handle_t *smh, switch_media_type_t type, switch_rtp_engine_t *engine)
+{
+	const char *ip;
+	switch_port_t port;
+	int idx;
+
+	/* Prefer IPv6 (passes the default wan.auto candidate ACL as a global address), else IPv4,
+	   else the engine's already-chosen local SDP IP. Using our own media IP guarantees
+	   ip_possible() and keeps the candidate within the configured candidate ACL. */
+	if (!zstr(smh->mparams->rtpip6)) {
+		ip = smh->mparams->rtpip6;
+	} else if (!zstr(smh->mparams->rtpip4)) {
+		ip = smh->mparams->rtpip4;
+	} else {
+		ip = engine->local_sdp_ip;
+	}
+
+	if (zstr(ip)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_WARNING,
+						  "Trickle ICE: no local media IP available for a fake candidate\n");
+		return 0;
+	}
+
+	idx = engine->ice_in.cand_idx[0];
+	if (idx >= MAX_CAND - 1) {
+		return 0;
+	}
+
+	port = reserve_trickle_blackhole(smh, engine, ip);
+	if (!port) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_WARNING,
+						  "Trickle ICE: could not reserve a blackhole port for the fake candidate\n");
+		return 0;
+	}
+
+	/* Mirror the default the a=candidate parse path installs (wan.auto) so the choosing loop has
+	   an ACL to match against - including the same WARNING, so operators can see the fallback. */
+	if (!engine->cand_acl_count) {
+		engine->cand_acl[engine->cand_acl_count++] = "wan.auto";
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_WARNING, "NO candidate ACL defined, Defaulting to wan.auto\n");
+	}
+
+	/* Clear the slots first: check_ice does not memset ice_in.cands[][], so on a re-INVITE these
+	   reused indices may still hold responsive/use_candidate/ready/media_rcv_last/con_addr from a
+	   prior negotiation, which the media thread or the RTCP-ICE activation could mistake for an
+	   already-nominated pair / a live RTCP target. Clear both the RTP slot we populate and the
+	   RTCP component slot at the reused index (under rtcp-mux the choosing loop overwrites the
+	   RTCP slot from the RTP candidate; without mux it would otherwise stay stale). */
+	memset(&engine->ice_in.cands[idx][0], 0, sizeof(engine->ice_in.cands[idx][0]));
+	memset(&engine->ice_in.cands[engine->ice_in.chosen[1]][1], 0, sizeof(engine->ice_in.cands[engine->ice_in.chosen[1]][1]));
+
+	engine->ice_in.cands[idx][0].foundation = switch_core_session_strdup(smh->session, "1");
+	engine->ice_in.cands[idx][0].component_id = 1;
+	engine->ice_in.cands[idx][0].transport = switch_core_session_strdup(smh->session, "udp");
+	engine->ice_in.cands[idx][0].priority = 1; /* deliberately low: a learned peer-reflexive outranks it */
+	engine->ice_in.cands[idx][0].con_addr = switch_core_session_strdup(smh->session, ip);
+	engine->ice_in.cands[idx][0].con_port = port;
+	engine->ice_in.cands[idx][0].cand_type = switch_core_session_strdup(smh->session, "host");
+	engine->ice_in.cands[idx][0].generation = switch_core_session_strdup(smh->session, "");
+	engine->ice_in.cands[idx][0].raddr = switch_core_session_strdup(smh->session, "");
+	engine->ice_in.cand_idx[0]++;
+
+	switch_channel_set_flag(smh->session->channel, CF_ICE);
+
+	switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(smh->session), SWITCH_LOG_INFO,
+					  "Trickle ICE: injected fake %s candidate %s:%d (blackhole) - real peer will be learned from binding requests\n",
+					  type2str(type), ip, port);
+	return 1;
+}
+
 //?
 static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t type, sdp_session_t *sdp, sdp_media_t *m)
 {
@@ -4095,7 +4215,7 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 	sdp_attribute_t *attr = NULL, *attrs[2] = { 0 };
 	int i = 0, got_rtcp_mux = 0;
 	const char *val;
-	int ice_seen = 0, cid = 0, ai = 0, attr_idx = 0, cand_seen = 0, relay_ok = 0;
+	int ice_seen = 0, cid = 0, ai = 0, attr_idx = 0, cand_seen = 0, relay_ok = 0, trickle_no_cand = 0, trickle_seen = 0, cand_attr_seen = 0;
 	char con_addr[256];
 	int ice_resolve = 0;
 	ip_t ip;
@@ -4154,6 +4274,11 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 				}
 			} else if (!strcasecmp(attr->a_name, "ice-options")) {
 				engine->ice_in.options = switch_core_session_strdup(smh->session, attr->a_value);
+				/* Note trickle from THIS offer's parse - engine->ice_in.options persists across
+				   re-INVITEs and must not be used to gate the candidate-less accept below. */
+				if (switch_stristr("trickle", attr->a_value)) {
+					trickle_seen = 1;
+				}
 			} else if (!strcasecmp(attr->a_name, "setup")) {
 				if (!strcasecmp(attr->a_value, "passive") ||
 					(!strcasecmp(attr->a_value, "actpass") && !switch_channel_test_flag(smh->session->channel, CF_REINVITE))) {
@@ -4218,6 +4343,12 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 #endif
 			} else if (!strcasecmp(attr->a_name, "candidate")) {
 				switch_channel_set_flag(smh->session->channel, CF_ICE);
+
+				/* Count every candidate line the peer offered, BEFORE the parse-time drops below
+				   (non-udp, unresolvable, no network path). The trickle fake-candidate injection
+				   must only trigger when the peer offered NO candidate at all - an offer whose
+				   candidates were all dropped is not the trickle case and must still fail. */
+				cand_attr_seen++;
 
 				if (!engine->cand_acl_count) {
 					engine->cand_acl[engine->cand_acl_count++] = "wan.auto";
@@ -4323,8 +4454,26 @@ static switch_status_t check_ice(switch_media_handle_t *smh, switch_media_type_t
 		return SWITCH_STATUS_SUCCESS;
 	}
 
+	/* Trickle ICE (RFC 8838): a candidate-less offer that signals trickle is valid - the peer
+	   trickles candidates later and/or we learn them from incoming binding requests. Only when
+	   THIS offer explicitly signaled trickle (trickle_seen, from the parse above - not the
+	   persistent engine->ice_in.options, which survives re-INVITEs) AND the offer carried NO
+	   a=candidate line at all (cand_attr_seen == 0). Gating on cand_attr_seen (candidate lines
+	   present), not cand_seen (candidates saved), so an offer whose candidates were all
+	   parse-dropped or ACL-rejected still fails below instead of getting a fake candidate. */
+	trickle_no_cand = (cand_attr_seen == 0 && trickle_seen);
+
+	if (trickle_no_cand) {
+		/* Inject one synthetic (blackhole) candidate so the normal ICE path (choosing loop, ACL,
+		   activation) runs with a valid, inert target instead of failing. The real peer is learned
+		   as a peer-reflexive from its incoming binding requests and wins the nomination. */
+		if (inject_trickle_fake_candidate(smh, type, engine)) {
+			cand_seen++;
+		}
+	}
+
 	relay_ok = 0;
-	
+
  relay:
 	
 	for (cid = 0; cid < MAX_CAND_IDX_COUNT; cid++) {
