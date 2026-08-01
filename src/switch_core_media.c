@@ -8304,6 +8304,17 @@ SWITCH_DECLARE(switch_status_t) switch_core_media_choose_port(switch_core_sessio
 		switch_channel_set_variable(session->channel, SWITCH_LOCAL_MEDIA_IP_VARIABLE, engine->local_sdp_ip);
 		switch_channel_set_variable_printf(session->channel, SWITCH_LOCAL_MEDIA_PORT_VARIABLE, "%d", sdp_port);
 		switch_channel_set_variable(session->channel, SWITCH_ADVERTISED_MEDIA_IP_VARIABLE, engine->adv_sdp_ip);
+
+		/* Dual-stack: expose ALL configured local media families (comma separated) so an early
+		   consumer - e.g. the pre-answer UDP hole puncher - has both local bind addresses before
+		   the local SDP string is serialized (rtp_local_sdp_str is only set later, after the
+		   pre-answer hook). The shared media port is local_media_port. Single-family: one address. */
+		if (!zstr(smh->mparams->rtpip4) && !zstr(smh->mparams->rtpip6)) {
+			switch_channel_set_variable_printf(session->channel, SWITCH_LOCAL_MEDIA_IP_LIST_VARIABLE, "%s,%s",
+											   smh->mparams->rtpip4, smh->mparams->rtpip6);
+		} else {
+			switch_channel_set_variable(session->channel, SWITCH_LOCAL_MEDIA_IP_LIST_VARIABLE, engine->local_sdp_ip);
+		}
 	} else if (type == SWITCH_MEDIA_TYPE_VIDEO) {
 		switch_channel_set_variable(session->channel, SWITCH_LOCAL_VIDEO_IP_VARIABLE, engine->adv_sdp_ip);
 		switch_channel_set_variable_printf(session->channel, SWITCH_LOCAL_VIDEO_PORT_VARIABLE, "%d", sdp_port);
