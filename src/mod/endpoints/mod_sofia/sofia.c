@@ -10299,6 +10299,17 @@ void sofia_handle_sip_i_reinvite(switch_core_session_t *session,
 				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Update callee ID\n");
 				sofia_update_callee_id(session, profile, sip, SWITCH_TRUE);
 			}
+		} else if (ua && switch_string_match(ua, strlen(ua) - 1, "OpenScape Voice", 14) == SWITCH_STATUS_SUCCESS) {
+			/* OpenScape Voice reports a completed transfer on the existing dialog: the
+			   re-INVITE leaves From untouched and carries the new connected party only in
+			   P-Asserted-Identity, without a Referred-By header. sofia_update_callee_id()
+			   compares against the identity currently stored on the channel and returns
+			   without firing anything when nothing changed, so a plain media re-INVITE
+			   stays silent. */
+			if (sip_p_asserted_identity(sip)) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Update caller ID from P-Asserted-Identity\n");
+				sofia_update_callee_id(session, profile, sip, SWITCH_TRUE);
+			}
 		}
 		if (!sip->sip_payload && ua && switch_string_match(ua, strlen(ua) - 1, "OpenScape Business", 17) == SWITCH_STATUS_SUCCESS) {
 			switch_channel_set_variable(channel, "osb_no_sdp", "true");
