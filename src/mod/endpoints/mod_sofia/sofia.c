@@ -10307,7 +10307,7 @@ void sofia_handle_sip_i_reinvite(switch_core_session_t *session,
 			   without firing anything when nothing changed, so a plain media re-INVITE
 			   stays silent. */
 			if (sip_p_asserted_identity(sip)) {
-				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Update caller ID from P-Asserted-Identity\n");
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "Update callee ID from P-Asserted-Identity\n");
 				sofia_update_callee_id(session, profile, sip, SWITCH_TRUE);
 			}
 		}
