@@ -4138,7 +4138,10 @@ static void parse_gateways(sofia_profile_t *profile, switch_xml_t gateways_tag, 
 					gateway->ping_max = ping_max;
 					gateway->ping_min = ping_min;
 					gateway->ping_monitoring = ping_monitoring;
-					gateway->ping = switch_epoch_time_now(NULL) + ping_freq;
+					/* First OPTIONS ping right away, not ping_freq seconds after the gateway is created: a gateway with
+					   ping monitoring is up only after its first answered ping, so the old schedule kept every new or
+					   restarted gateway out of service for at least 5 s (ping_freq >= 5). Later pings keep ping_freq. */
+					gateway->ping = switch_epoch_time_now(NULL);
 					gateway->options_to_uri = switch_core_sprintf(gateway->pool, "<sip:%s>",
 						!zstr(from_domain) ? from_domain : proxy);
 					gateway->options_from_uri = gateway->options_to_uri;
