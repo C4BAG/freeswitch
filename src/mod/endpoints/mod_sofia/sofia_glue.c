@@ -2128,14 +2128,14 @@ void sofia_glue_restart_all_profiles(void)
 		for (hi = switch_core_hash_first(mod_sofia_globals.profile_hash); hi; hi = switch_core_hash_next(&hi)) {
 			switch_core_hash_this(hi, &var, NULL, &val);
 			if ((pptr = (sofia_profile_t *) val)) {
-				int rsec = 10;
-				int diff = (int) (switch_epoch_time_now(NULL) - pptr->started);
-				int remain = rsec - diff;
+				/* Same rule as "sofia profile <name> stop/restart" in mod_sofia.c: started means its main loop has run. */
+				int rsec = 1;
+				int remain = rsec;
 				if (sofia_test_pflag(pptr, PFLAG_RESPAWN) || !sofia_test_pflag(pptr, PFLAG_RUNNING)) {
 					continue;
 				}
 
-				if (diff < rsec) {
+				if (!pptr->last_root_step) {
 					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
 									  "Profile %s must be up for at least %d seconds to stop/restart.\nPlease wait %d second%s\n",
 									  pptr->name, rsec, remain, remain == 1 ? "" : "s");

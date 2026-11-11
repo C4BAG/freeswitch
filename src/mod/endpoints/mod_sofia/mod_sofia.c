@@ -3734,10 +3734,14 @@ static switch_status_t cmd_profile(char **argv, int argc, switch_stream_handle_t
 	}
 
 	if (!strcasecmp(argv[1], "stop") || !strcasecmp(argv[1], "restart")) {
-		int rsec = 10;
-		int diff = (int) (switch_epoch_time_now(NULL) - profile->started);
-		int remain = rsec - diff;
-		if (diff < rsec) {
+		/* A profile can be stopped once its thread has finished starting: the first pass of its main loop sets
+		   last_root_step, about 1 s after the start (sofia_profile_thread_run yields 1 s before the loop). This was a
+		   fixed 10 s since 2008 (3 s before), raised "to compensate for bug in sofia lib on nua_destroy"; the
+		   shutdown has since been made to wait for nua_shutdown to complete before it calls nua_destroy.
+		   The message keeps its format: C4B_Gateway.StopProfileWithUptimeRetry parses it and retries. */
+		int rsec = 1;
+		int remain = rsec;
+		if (!profile->last_root_step) {
 			stream->write_function(stream, "Profile %s must be up for at least %d seconds to stop/restart.\nPlease wait %d second%s\n",
 								   profile->name, rsec, remain, remain == 1 ? "" : "s");
 		} else {
